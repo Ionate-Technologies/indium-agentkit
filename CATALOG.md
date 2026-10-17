@@ -53,6 +53,7 @@ leaves them out; install one explicitly with `add <name>`.
 | skill | `systematic-debugging` | Investigate a bug, failing test, regression, unexpected output, or production issue through reproduction, evidence, hypotheses, root-cause analysis, and a regression test before fixing it. |
 | skill | `test-first-change` | Plan and implement behavior changes, bug fixes, or refactors using Test-Driven Development (TDD) red-green-refactor cycles and behavior-level test seams. |
 | skill | `threat-modeling` | Perform structured threat modeling (STRIDE/PASTA) on architecture diagrams, system interfaces, and data flow graphs before implementation. |
+| skill | `upgrade-dependencies` | Upgrade a framework, runtime, or library across a major version (for example React 18 to 19, a Node.js LTS bump, a Django or Spring Boot major, a new Python minor) by reading every intermediate migration guide, upgrading in small verified increments, applying vendor codemods, and recording behavior changes. Use when asked to upgrade, bump, or migrate to a newer major version. Not for deciding what is vulnerable or stale (use the dependency-audit skill). |
 | skill | `verify-and-ship` | Verify completed repository changes, run test and lint commands, audit diffs for secrets, and commit/publish cleanly according to repository rules. |
 | skill | `write-documentation` | Author, update, or audit project documentation — READMEs, architecture decisions, API references, onboarding guides, and inline doc — from code evidence. |
 | skill | `write-runbook` | Create or update an operational runbook for a service, feature, or failure mode with detection, diagnosis, mitigation, recovery, and escalation procedures. |
@@ -67,6 +68,7 @@ leaves them out; install one explicitly with `add <name>`.
 | subagent | `debugger` | Investigates a bug, failing test, or regression by reproducing it, tracing the divergence, and testing competing hypotheses, then returns the root cause with evidence and no fix. Use when the cause of wrong behavior is unknown and evidence gathering can run in parallel with other work. Read-only. |
 | subagent | `dependency-auditor` | Audit dependency vulnerabilities, staleness, and license risk read-only. |
 | subagent | `doc-writer` | Audit and draft project documentation, API specs, and onboarding guides read-only. |
+| subagent | `docs-researcher` | Researches authoritative external documentation for the exact library, framework, SDK, or API versions a project uses, and returns version-tagged, cited facts to prevent hallucinated APIs. Use when code depends on an API whose signature, behavior, configuration, or version differences are uncertain, or before an upgrade. Read-only. |
 | subagent | `ebpf-specialist` | Audit eBPF bytecode, XDP packet processing programs, eBPF maps, and kernel-level tracing probes for safety, side effects, and verifier bounds read-only. |
 | subagent | `estimator` | Assess complexity, technical risk, dependencies, and effort read-only. |
 | subagent | `explorer` | Map repository structure, entry points, dependencies, and data flows read-only. |
