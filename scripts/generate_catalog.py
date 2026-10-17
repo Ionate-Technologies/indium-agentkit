@@ -18,6 +18,9 @@ Generated from `SKILL.md` and subagent frontmatter with:
 python scripts/list_content.py --format markdown
 ```
 
+Items marked "internal" apply only to this repository. The `install` bundle
+leaves them out; install one explicitly with `add <name>`.
+
 """
 
 

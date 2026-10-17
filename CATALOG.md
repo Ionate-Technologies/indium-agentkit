@@ -6,13 +6,16 @@ Generated from `SKILL.md` and subagent frontmatter with:
 python scripts/list_content.py --format markdown
 ```
 
+Items marked "internal" apply only to this repository. The `install` bundle
+leaves them out; install one explicitly with `add <name>`.
+
 
 | Kind | Name | Description |
 | --- | --- | --- |
 | skill | `accessibility-audit` | Audit user interfaces for WCAG 2.1/2.2 AA/AAA conformance, ARIA semantics, keyboard operability, screen reader compatibility, and color contrast. |
 | skill | `api-design` | Design an API contract — resources, operations, schemas, errors, versioning, and pagination — from requirements before implementation, producing a completed api-contract handoff. |
 | skill | `ast-manipulation-codemods` | Write Abstract Syntax Tree (AST) transformers to automate large-scale, syntax-aware codebase migrations. |
-| skill | `author-agentkit-content` | Create or revise indium-agentkit skills, subagents, templates, and their validation and catalog files to the repository authoring standard. Use when adding, rewriting, or reviewing content in this agentkit repository. Internal to this repository; not for consumer projects. |
+| skill (internal) | `author-agentkit-content` | Create or revise indium-agentkit skills, subagents, templates, and their validation and catalog files to the repository authoring standard. Use when adding, rewriting, or reviewing content in this agentkit repository. Internal to this repository; not for consumer projects. |
 | skill | `backend-api` | Build robust typed API endpoints with safe contracts. |
 | skill | `ci-pipeline` | Design reliable CI pipelines with useful required checks. |
 | skill | `compliance-audit` | Audit code, configuration, and data flows against GDPR, SOC 2, HIPAA, and PCI-DSS compliance controls including PII redaction and audit logging. |

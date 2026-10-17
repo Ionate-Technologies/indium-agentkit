@@ -104,5 +104,27 @@ class CliTests(unittest.TestCase):
             self.assertEqual(list(home.iterdir()), [])
 
 
+    def test_install_bundle_skips_internal_items_and_passes_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project = root / "project"
+            home = root / "home"
+            project.mkdir()
+            home.mkdir()
+
+            first = self.run_cli(project, home, "install", "--scope=project", "--target=claude")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            skills = project / ".claude" / "skills"
+            self.assertTrue((skills / "review-change" / "SKILL.md").is_file())
+            self.assertFalse((skills / "author-agentkit-content").exists())
+
+            stale = skills / "review-change" / "SKILL.md"
+            stale.write_text("old\n", encoding="utf-8")
+            forced = self.run_cli(
+                project, home, "install", "--scope=project", "--target=claude", "--force"
+            )
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+            self.assertNotEqual(stale.read_text(encoding="utf-8"), "old\n")
+
 if __name__ == "__main__":
     unittest.main()

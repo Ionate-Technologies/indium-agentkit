@@ -54,6 +54,7 @@ function printHelp() {
   console.log('  --project-dir=<path>   Project destination (default: current directory)');
   console.log('  --target=<agent>       One target, comma-separated targets, all, or auto');
   console.log('  --mode=copy|link       Durable copies by default; links suit repository development');
+  console.log('  --force                Replace existing copies of agentkit content (for upgrades)');
   console.log('  --global               Alias for --scope=user\n');
   console.log('Examples:');
   console.log('  npx @indium-ai-labs/agentkit install --target=codex');
@@ -116,6 +117,7 @@ const installerArguments = [
 for (const target of targets) installerArguments.push('--target', target);
 if (scope === 'project') installerArguments.push('--project-dir', projectDir);
 if (command === 'install') installerArguments.push('--include-context');
+if (hasFlag('force')) installerArguments.push('--force');
 
 const pythonCommand = process.env.AGENTKIT_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 console.log(

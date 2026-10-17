@@ -26,6 +26,9 @@ AGENT_DESTINATIONS = {
     "gemini": Path(".gemini/agents"),
     "antigravity": Path(".antigravity/agents"),
 }
+# Content that only applies to this repository. It is left out of the default
+# bundle but can still be installed explicitly with `add <name>`.
+INTERNAL_ITEMS = frozenset({"author-agentkit-content"})
 
 
 def paths_match(left: Path, right: Path) -> bool:
@@ -52,7 +55,17 @@ def remove_link(path: Path) -> None:
         path.unlink()
 
 
-def install_path(source: Path, destination: Path, mode: str) -> str:
+def remove_existing(path: Path) -> None:
+    if path.is_symlink():
+        remove_link(path)
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def install_path(source: Path, destination: Path, mode: str, force: bool = False) -> str:
+    """Install one artifact. With force, replace an existing destination of the same name."""
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     if destination.is_symlink():
@@ -62,14 +75,20 @@ def install_path(source: Path, destination: Path, mode: str) -> str:
             same_target = False
         if mode == "link" and same_target:
             return f"unchanged: {destination} -> {source}"
-        if mode == "copy" and not same_target:
+        if mode == "copy" and not same_target and not force:
             return f"skipped:   {destination} is a symlink to another location"
         remove_link(destination)
         action = "migrated" if mode == "copy" else "updated"
     elif destination.exists():
         if mode == "copy" and paths_match(source, destination):
             return f"unchanged: {destination}"
-        return f"skipped:   {destination} exists and is not managed by this install"
+        if not force:
+            return (
+                f"skipped:   {destination} exists and is not managed by this install "
+                "(rerun with --force to replace it)"
+            )
+        remove_existing(destination)
+        action = "replaced"
     else:
         action = "linked" if mode == "link" else "copied"
 
@@ -98,7 +117,10 @@ def select_content(repo_root: Path, item: str) -> tuple[list[Path], list[Path]]:
     )
     agents = sorted(agents_dir.glob("*.md"))
     if item == "all":
-        return skills, agents
+        return (
+            [path for path in skills if path.name not in INTERNAL_ITEMS],
+            [path for path in agents if path.stem not in INTERNAL_ITEMS],
+        )
 
     selected_skills = [path for path in skills if path.name == item]
     selected_agents = [path for path in agents if path.stem == item]
@@ -124,7 +146,7 @@ def expand_targets(requested: list[str]) -> list[str]:
 
 
 def build_cursor_rules(
-    repo_root: Path, destination: Path, skills: list[Path], item: str
+    repo_root: Path, destination: Path, skills: list[Path], item: str, force: bool = False
 ) -> None:
     if not skills:
         return
@@ -148,7 +170,7 @@ def build_cursor_rules(
             )
         for skill in skills:
             generated_rule = generated_dir / f"{skill.name}.mdc"
-            print(install_path(generated_rule, destination / generated_rule.name, "copy"))
+            print(install_path(generated_rule, destination / generated_rule.name, "copy", force))
 
 
 def parse_args() -> argparse.Namespace:
@@ -166,6 +188,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--item", default="all", help="One skill/subagent name or all")
     parser.add_argument("--mode", choices=("link", "copy"), default="link")
     parser.add_argument("--include-context", action="store_true")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace existing skills, subagents, and Cursor rules that have the same "
+        "name as agentkit content (for example copies from an older version). "
+        "Project context files are never replaced.",
+    )
     parser.add_argument("--home", type=Path, default=Path.home(), help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -212,7 +241,10 @@ def main() -> int:
                 for skill in skills:
                     print(
                         install_path(
-                            skill, install_root / skill_destination / skill.name, args.mode
+                            skill,
+                            install_root / skill_destination / skill.name,
+                            args.mode,
+                            args.force,
                         )
                     )
 
@@ -221,13 +253,16 @@ def main() -> int:
                 for agent in agents:
                     print(
                         install_path(
-                            agent, install_root / agent_destination / agent.name, args.mode
+                            agent,
+                            install_root / agent_destination / agent.name,
+                            args.mode,
+                            args.force,
                         )
                     )
 
             if target == "cursor":
                 build_cursor_rules(
-                    repo_root, install_root / ".cursor" / "rules", skills, args.item
+                    repo_root, install_root / ".cursor" / "rules", skills, args.item, args.force
                 )
 
         if args.scope == "project" and args.include_context:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from install import INTERNAL_ITEMS
 from sync_vendor_rules import extract_body
 
 
@@ -22,6 +23,8 @@ def export_bundle(repo_root: Path) -> str:
     for skill_file in sorted((repo_root / "skills").glob("*/SKILL.md")):
         fields, body = extract_body(skill_file)
         name = fields.get("name", skill_file.parent.name)
+        if name in INTERNAL_ITEMS:
+            continue
         desc = fields.get("description", "")
         lines.append(f"# [SKILL] {name}")
         lines.append(f"**Description**: {desc}")
@@ -34,6 +37,8 @@ def export_bundle(repo_root: Path) -> str:
     for agent_file in sorted((repo_root / "agents").glob("*.md")):
         fields, body = extract_body(agent_file)
         name = fields.get("name", agent_file.stem)
+        if name in INTERNAL_ITEMS:
+            continue
         desc = fields.get("description", "")
         lines.append(f"# [SUBAGENT] {name}")
         lines.append(f"**Description**: {desc}")

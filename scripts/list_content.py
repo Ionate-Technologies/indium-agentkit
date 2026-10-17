@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+from install import INTERNAL_ITEMS
 from validate_content import parse_frontmatter
 
 
@@ -14,10 +15,14 @@ def collect(repo_root: Path) -> list[dict[str, str]]:
     content: list[dict[str, str]] = []
     for skill_file in sorted((repo_root / "skills").glob("*/SKILL.md")):
         fields, _ = parse_frontmatter(skill_file)
-        content.append({"kind": "skill", "name": fields.get("name", skill_file.parent.name), "description": fields.get("description", "")})
+        name = fields.get("name", skill_file.parent.name)
+        kind = "skill (internal)" if name in INTERNAL_ITEMS else "skill"
+        content.append({"kind": kind, "name": name, "description": fields.get("description", "")})
     for agent_file in sorted((repo_root / "agents").glob("*.md")):
         fields, _ = parse_frontmatter(agent_file)
-        content.append({"kind": "subagent", "name": fields.get("name", agent_file.stem), "description": fields.get("description", "")})
+        name = fields.get("name", agent_file.stem)
+        kind = "subagent (internal)" if name in INTERNAL_ITEMS else "subagent"
+        content.append({"kind": kind, "name": name, "description": fields.get("description", "")})
     return content
 
 
