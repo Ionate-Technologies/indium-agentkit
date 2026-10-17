@@ -13,6 +13,7 @@ leaves them out; install one explicitly with `add <name>`.
 | Kind | Name | Description |
 | --- | --- | --- |
 | skill | `accessibility-audit` | Audit user interfaces for WCAG 2.1/2.2 AA/AAA conformance, ARIA semantics, keyboard operability, screen reader compatibility, and color contrast. |
+| skill | `address-review-feedback` | Respond to pull request review comments: fetch every review thread, classify each comment as must-fix, agree-and-fix, question, disagree, or out of scope, make minimal focused changes, run the checks, and draft replies that reference each change. Use when a PR has review comments or requested changes, or the user asks to address reviewer feedback. Not for reviewing a change yourself (use the review-change skill). |
 | skill | `api-design` | Design an API contract — resources, operations, schemas, errors, versioning, and pagination — from requirements before implementation, producing a completed api-contract handoff. |
 | skill | `ast-manipulation-codemods` | Write Abstract Syntax Tree (AST) transformers to automate large-scale, syntax-aware codebase migrations. |
 | skill (internal) | `author-agentkit-content` | Create or revise indium-agentkit skills, subagents, templates, and their validation and catalog files to the repository authoring standard. Use when adding, rewriting, or reviewing content in this agentkit repository. Internal to this repository; not for consumer projects. |
@@ -33,6 +34,7 @@ leaves them out; install one explicitly with `add <name>`.
 | skill | `hardware-in-loop-testing` | Interface hardware-in-the-loop (HIL) simulation testbeds with embedded firmware endpoints under noise and faults. |
 | skill | `incident-triage` | Triage incidents with evidence, mitigation, and follow-up. |
 | skill | `infrastructure-review` | Review infrastructure for security, reliability, and cost risks. |
+| skill | `init-agent-context` | Create or refresh a project's AGENTS.md, and CLAUDE.md for Claude Code, from repository evidence: what the project is, verified test and lint commands, source and test locations, conventions, and agent gotchas, kept short because it loads into every session. Use when a repository has no agent context file, the existing one is stale or wrong, or the user asks to set up agent instructions. Not for long human onboarding guides (use the onboard-to-codebase skill). |
 | skill | `llm-eval-harness` | Design and execute evaluation benchmarks for prompts, RAG retrieval pipelines, and agent tools to measure cost, latency, accuracy, and guardrails. |
 | skill | `load-testing-suite` | Design, configure, and execute performance load and stress testing suites (k6, Locust) with latency SLAs and throughput targets. |
 | skill | `local-llm-integration` | Deploy, optimize, and serve quantized open-weight local LLMs (vLLM/Ollama/llama.cpp) with GQA-aware VRAM pre-flight validation, process-scoped cleanup, and healthcheck polling. |
