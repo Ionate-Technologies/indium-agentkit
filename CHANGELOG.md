@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented here.
 
+## 2.1.0 - 2026-10-17
+
+Workflows for building the features the kit could previously only design or
+review. All additions are backward compatible.
+
+### Added
+
+- Security and identity skills: `implement-authentication`,
+  `access-control-design`, `browser-security-config`, `config-and-secrets`,
+  `handle-file-uploads`.
+- Backend and data skills: `background-jobs-and-queues`, `add-caching`,
+  `production-data-fix`, `data-retention-and-erasure`, `build-retrieval`,
+  `analyze-data`, `ml-model-development`, `product-analytics`.
+- Infrastructure and supply-chain skills: `infrastructure-as-code`,
+  `kubernetes-workloads`, `supply-chain-security`, `publish-library`,
+  `evaluate-new-dependency`.
+- Frontend and mobile skills: `mobile-feature`, `internationalize-ui`,
+  `e2e-test-suite`, `feature-flag-lifecycle`, `strengthen-types`.
+- Operations and debugging skills: `git-recovery`, `write-ops-script`,
+  `memory-leak-investigation`.
+- Subagents: `concurrency-reviewer` and `api-compatibility-checker`
+  (read-only), and `infra-builder` and `mobile-builder` (write-scoped).
+
+### Changed
+
+- `test-writer` checks its tests for smells and reports surviving mutants
+  where the project has mutation testing, and `review-change` flags tests that
+  cannot fail.
+- `observability-setup` adds an SLI and SLO definition step, and
+  `third-party-integration` adds payments guidance.
+- Existing skills and subagents route to the new workflows from their "When
+  not to use" sections, and `frontend-builder` is described as web-only so it
+  no longer competes with `mobile-builder`.
+
+### Upgrading
+
+Rerun your install command with `--force` to pick up the changed existing
+items; new items install without it.
+
 ## 2.0.0 - 2026-10-17
 
 Every skill and subagent was rewritten to a lean, portable authoring standard,

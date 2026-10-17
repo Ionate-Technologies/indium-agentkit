@@ -1,6 +1,6 @@
 {
   "name": "@indium-ai-labs/agentkit",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Portable AI coding-agent skills, subagents, and project-context templates.",
   "main": "scripts/cli.js",
   "bin": {

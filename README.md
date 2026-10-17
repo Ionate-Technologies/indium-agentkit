@@ -157,8 +157,9 @@ Subagents do not yet have a unified cross-tool schema. Agentkit uses Claude
 Code-compatible frontmatter (`name`, `description`, `tools`, and `model`) as
 the portable source shape. Most subagents are read-only reviewers and
 investigators; a few implementers (`backend-builder`, `frontend-builder`,
-`test-writer`, `doc-writer`) declare `Edit` and `Write` and change only the paths
-the parent assigns. `ARCHITECTURE.md` lists each role.
+`mobile-builder`, `infra-builder`, `test-writer`, `doc-writer`) declare `Edit`
+and `Write` and change only the paths the parent assigns. `ARCHITECTURE.md`
+lists each role.
 
 ## Repository layout
 

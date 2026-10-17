@@ -9,8 +9,10 @@ unredacted logs. `scripts/validate_content.py` detects common credential shapes,
 but it is not a complete secret scanner.
 
 Keep review and verification agents read-only by default. Write-scoped
-subagents (`backend-builder`, `frontend-builder`, `test-writer`, `doc-writer`)
-declare `Edit` and `Write` and must change only the paths the parent assigns.
+subagents (`backend-builder`, `frontend-builder`, `mobile-builder`,
+`infra-builder`, `test-writer`, `doc-writer`) declare `Edit` and `Write` and must
+change only the paths the parent assigns. `infra-builder` never applies
+infrastructure changes and `mobile-builder` never publishes builds.
 Every subagent has `Bash`, which frontmatter cannot restrict, so read-only and
 path limits depend on each subagent's instructions and on the host's permission
 settings; review those settings before running subagents unattended.
