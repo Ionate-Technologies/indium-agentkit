@@ -1,423 +1,256 @@
 ---
 name: deployment-safety
-description: Plan and verify staged deployments with safe rollback.
+description: "Plan and verify a staged rollout of a service change: preflight checks, canary cohorts, health gates with abort thresholds, a rehearsed rollback, and a verification report. Use when preparing or executing a deploy, canary, blue-green, or rollback plan. Every environment change, staging included, needs explicit approval. Not for database migration plans (use the safe-migration skill) or active incidents (use the incident-triage skill)."
 ---
 
 # Deployment Safety
 
-Prepare a production change so it can be released deliberately, observed
-continuously, and reversed within a bounded time. The default model is a
-**staged rollout** — preflight, canary cohort, observation windows, expansion,
-completion — executed against explicit health signals and abort thresholds,
-with a rehearsed rollback path.
+Prepare a change so it can be released deliberately, observed at every step,
+and reversed quickly. The stance is **plan first, mutate only with approval**:
+the agent drafts the plan and runs read-only checks; every command that changes
+an environment, including staging rollback drills, runs only after the user
+explicitly approves it.
 
-The default tooling targets **Kubernetes-style platforms** (`kubectl` rollout
-state, traffic-weighted canary cohorts) plus generic HTTP health probes
-(`curl`) and metrics queries; adapt to the consumer project's actual
-deployment platform (serverless, VM images, PaaS, mobile distribution) before
-planning. Inspect the project's `AGENTS.md`, deployment platform,
-environments, service dependencies, and release policy before making
-assumptions.
+## When to use
 
----
+- Planning a production (or staging) release, canary, blue-green switch, or
+  rolling update.
+- Defining health gates, abort thresholds, halt authority, and rollback steps.
+- Executing an approved rollout stage by stage and recording the evidence.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Schema or data changes need a rollout plan: use the `safe-migration` skill or
+  delegate to the `migration-planner` subagent, then reference that plan here.
+- Production is already broken: use the `incident-triage` skill.
+- Mobile app store or OTA releases: use the `mobile-release-safety` skill.
+- Pre-merge checks for a change: use the `verify-and-ship` skill.
+- Release readiness audit: delegate to the `release-engineer` subagent.
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Plan a canary release of checkout-service
-   build 9f3a2c1 to production"*), the agent **must automatically infer and
-   populate** `release_spec`, `rollout_context`, and `signal_context` from
-   the user's text and the repository's deployment configuration.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these before asking; ask only what remains ambiguous.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DeploymentSafetyContextManifest",
-  "type": "object",
-  "required": ["release_spec", "rollout_context", "signal_context"],
-  "properties": {
-    "release_spec": {
-      "type": "object",
-      "required": ["artifact", "revision", "environment"],
-      "properties": {
-        "artifact": { "type": "string", "pattern": "^[A-Za-z0-9._/@:-]+$" },
-        "revision": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
-        "environment": { "type": "string", "enum": ["development", "staging", "production"] },
-        "change_summary": { "type": "string" },
-        "owner": { "type": "string" }
-      }
-    },
-    "rollout_context": {
-      "type": "object",
-      "required": ["strategy", "authorized"],
-      "properties": {
-        "strategy": { "type": "string", "enum": ["canary", "blue_green", "rolling", "all_at_once"] },
-        "authorized": { "type": "boolean", "default": false },
-        "canary_cohorts": {
-          "type": "array",
-          "items": { "type": "integer", "minimum": 1, "maximum": 100 }
-        },
-        "observation_window_minutes": { "type": "integer", "minimum": 5, "default": 30 },
-        "operator": { "type": "string" },
-        "observer": { "type": "string" }
-      }
-    },
-    "signal_context": {
-      "type": "object",
-      "required": ["health_metrics", "abort_thresholds"],
-      "properties": {
-        "health_metrics": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["error_rate", "latency_p95", "latency_p99", "saturation", "business_kpi", "dependency_health", "log_anomalies"] },
-          "minItems": 1
-        },
-        "abort_thresholds": {
-          "type": "object",
-          "properties": {
-            "error_rate_max": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.01 },
-            "latency_p95_max_ms": { "type": "integer", "minimum": 1, "default": 500 },
-            "latency_p99_max_ms": { "type": "integer", "minimum": 1, "default": 1500 },
-            "business_kpi_drop_max": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.05 }
-          }
-        },
-        "rollback_time_objective_minutes": { "type": "integer", "minimum": 1, "default": 15 }
-      }
-    }
-  }
-}
-```
+- The artifact (image, package, bundle), the commit it was built from, and its
+  immutable digest from CI output.
+- Target environment, deployment platform and tooling (Kubernetes with or
+  without a progressive-delivery controller, serverless, VMs, PaaS), and the
+  project's deploy commands from `AGENTS.md`, runbooks, or CI.
+- What changed: code, configuration, feature flags, migrations, dependencies.
+- Health signals and where they live (metrics, logs, traces, dashboards), and
+  the project's SLOs or alert thresholds.
+- Release policy: approvals, maintenance windows, who may halt a rollout.
+- Who executes (operator) and who watches signals (observer).
 
-### Automatic Natural Language Inference & Path Traversal Validation Rules
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+1. **Define the change.** Owner, target environment, blast radius (services,
+   downstream consumers, shared databases, queues, caches), and success and
+   abort criteria as measurable statements: "canary 5xx rate stays below the
+   SLO for 30 minutes", never "looks healthy".
+2. **Verify the artifact and preconditions.** The digest matches the CI build
+   for the commit. Tests are green at that commit. Migrations are reviewed and
+   backward compatible (expand and contract) while old and new versions
+   overlap. Risky behavior sits behind a flag that defaults off. Required
+   approvals are recorded.
+3. **Check the environment.** Diff configuration between source and target
+   environments; unexplained deltas block the rollout. Confirm runtime
+   versions, dependency availability, secret references (by name only),
+   permissions, and capacity headroom.
+4. **Write the staged plan** (see the example): preflight, a small cohort,
+   observation windows, expansion, completion. One person should not be both
+   operator and observer for production unless the plan says so explicitly.
+5. **Bind each gate to a query** the observer runs verbatim. Scope canary
+   signals to the canary (a version or track label) and compare against the
+   stable baseline: a fleet-wide rate at 5% traffic hides a badly failing
+   canary. Treat a missing or empty signal as a failed gate.
+6. **Set abort thresholds and halt procedure.** Use the project's SLOs; for
+   example a 5xx rate above 1% or p95 latency above 500 ms. Halting freezes
+   expansion and preserves logs, metric snapshots, and deployment state before
+   any restart.
+7. **Define rollback and forward fix.** Know what a rollback does not revert.
+   For example, `kubectl rollout undo` restores only the previous pod template;
+   ConfigMaps, Secrets, migrations, flags, and messages already written stay as
+   they are. Document data compatibility both ways and a forward-fix path for
+   when rollback is unsafe.
+8. **Propose a staging rollback drill.** Present the exact drill commands and
+   run them only after approval. Record the measured time back to baseline.
+9. **Get explicit approval for the production scope**, then execute one stage
+   at a time. At each gate, run the gate checks, record timestamps and values,
+   and stop at the first failed gate: halt, preserve evidence, and propose the
+   rollback. Expanding beyond the approved scope needs new approval. Do not
+   improvise new actions mid-rollout.
+10. **Write the verification report** (see Report).
 
-- **`artifact`**: Detected from the project's build output configuration
-  (container image reference, package version). Every artifact must be
-  traceable to `revision`; an untraceable artifact blocks the plan.
-- **`revision`**: The current commit SHA from version control. Never plan a
-  production deploy of an untracked working tree.
-- **`environment`**: Inferred from prompt keywords; defaults to `staging`.
-  Any inference of `production` must be explicitly confirmed by the user.
-- **`strategy`**: Inferred from platform capability and change risk:
-  `canary` for user-facing production services, `rolling` for stateless
-  workers, `blue_green` where paired environments exist.
-- **`authorized`**: Always `false` unless the user explicitly authorizes
-  production execution. Natural language never implies authorization.
-- **`health_metrics`**: Defaults to
-  `["error_rate", "latency_p95", "dependency_health"]` when the repository
-  declares no observability conventions.
-- **`abort_thresholds`**: Derived from existing SLO documents or alert rules
-  if present; otherwise the schema defaults apply.
-- **Path Traversal Protection**: Any file path referenced in the rollout plan
-  (manifests, runbooks, handoffs) MUST NOT contain traversal segments (`.` or
-  `..`). Normalize paths and **ABORT execution immediately** if a traversal
-  attempt is detected.
+## Example: staged rollout plan
 
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
-
-### Step 1: Change Definition & Blast Radius
-
-1. Define the change, owner, target environment, blast radius, and explicit
-   success and abort criteria.
-2. Record affected services, downstream consumers, and shared resources
-   (databases, queues, caches) that a failure could touch.
-3. Write success criteria as measurable signal statements, not adjectives:
-   "error rate stays below 1% for 30 minutes", never "looks healthy".
-
-### Step 2: Artifact & Preconditions Verification
-
-1. Verify the artifact is reproducible and traceable to a commit: the build
-   digest matches CI output for `revision`.
-2. Confirm tests pass at `revision`, migrations are reviewed, configuration
-   diffs are enumerated, feature flags exist for risky behavior, and all
-   required approvals are recorded.
-
-### Step 3: Environment Parity & Capacity Check
-
-1. Check environment parity, runtime versions, dependency availability,
-   secrets references (by name only), permissions, capacity headroom, and
-   maintenance windows.
-2. Diff configuration between source and target environments; unexplained
-   deltas block the rollout until resolved or documented.
-
-### Step 4: Staged Rollout Plan Authorship
-
-1. Write a staged rollout: preflight, canary or small cohort, observation
-   window, expansion, and completion.
-2. Assign an operator (executes) and an observer (watches signals). One
-   person should not hold both roles for production without explicit
-   acknowledgment in the plan.
-
-### Step 5: Health Signal Selection
-
-1. Choose health signals before rollout: error rate, latency, saturation,
-   business outcome, logs, traces, and dependency health.
-2. Bind each signal to a concrete query or command the observer can execute
-   verbatim at every stage gate.
-
-### Step 6: Abort Thresholds & Halt Authority
-
-1. Define exact abort thresholds, who can stop the rollout, and how to halt
-   it without destroying evidence.
-2. The halt procedure must preserve logs, metrics snapshots, and deployment
-   state for post-incident analysis.
-
-### Step 7: Rollback & Forward-Fix Rehearsal
-
-1. Define and rehearse rollback or forward-fix steps, including database and
-   queue compatibility.
-2. Never assume a schema rollback is automatically safe: verify
-   expand-and-contract compatibility or document the forward-fix path.
-3. Execute the rollback drill in staging (Section 4) and record the measured
-   time-to-baseline against the RTO before requesting production
-   authorization.
-
-### Step 8: Authorized Execution & Evidence Capture
-
-1. Execute only the authorized scope, record timestamps and evidence at every
-   gate, and update the deployment handoff with results, limitations, and
-   follow-up actions.
-2. If any gate fails, halt per Step 6, capture the evidence bundle, and roll
-   back per Step 7. Do not improvise new actions mid-incident.
-
----
-
-## 3. Reference Implementation: Staged Rollout Plan Document
+Illustrative values; take thresholds from the project's SLOs.
 
 ```yaml
-# rollout-plan.yaml — canary release of checkout-service
 release:
   artifact: registry.example.com/checkout-service
   revision: 9f3a2c1d4e5f60718293a4b5c6d7e8f901234567
-  digest: sha256:<immutable-build-digest>
+  digest: sha256:<digest-from-ci>
   environment: production
-  owner: <release-owner-handle>
-  change_summary: "Add idempotent payment retry with exponential backoff"
-  blast_radius: "checkout-service pods; shared payments Postgres (read-only)"
-
+  change: "Idempotent payment retry behind flag payment_retry_v2 (default off)"
+  blast_radius: "checkout-service pods; payments Postgres (read-only access)"
 approvals:
-  code_review: "PR-4821 approved"
-  migration_review: "not required (no schema change)"
-  security_review: "not required (no new data flows)"
-
+  code_review: "PR 4821 approved"
+  migration_review: "not required: no schema change"
 preflight:
-  - verify digest matches CI build output for revision
-  - confirm tests green at revision: unit, integration, contract
-  - diff staging vs production configuration; expect zero unexplained deltas
-  - confirm feature flag payment_retry_v2 exists and defaults to disabled
-  - confirm capacity headroom >= 30% on CPU and connection pool
-  - confirm on-call operator and observer assignments
-
+  - digest matches the CI build for the revision
+  - unit, integration, and contract tests green at the revision
+  - staging versus production config diff has no unexplained deltas
+  - flag payment_retry_v2 exists and defaults to off
+  - capacity headroom meets policy (for example 30% CPU and pool)
 rollout:
-  strategy: canary
-  operator: <operator-handle>
-  observer: <observer-handle>
+  operator: <operator>
+  observer: <observer>
   stages:
-    - name: canary-5
-      traffic_percent: 5
-      observation_window_minutes: 30
-      gates: [error_rate, latency_p95, dependency_health]
-    - name: canary-25
-      traffic_percent: 25
-      observation_window_minutes: 30
-      gates: [error_rate, latency_p95, business_kpi]
-    - name: canary-50
-      traffic_percent: 50
-      observation_window_minutes: 20
-      gates: [error_rate, latency_p95]
-    - name: full
-      traffic_percent: 100
-      observation_window_minutes: 60
-      gates: [error_rate, latency_p95, latency_p99, saturation, business_kpi, dependency_health]
-
-signals:
-  error_rate: 'sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))'
-  latency_p95: 'histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))'
-  dependency_health: 'up{job="payments-gateway"} == 1'
-  business_kpi: 'rate(checkout_completed_total[10m]) >= 0.95 * baseline'
-
+    - { name: canary-5, traffic_percent: 5, observe_minutes: 30, gates: [error_rate, latency_p95, dependency_health] }
+    - { name: canary-25, traffic_percent: 25, observe_minutes: 30, gates: [error_rate, latency_p95, checkout_ratio] }
+    - { name: full, traffic_percent: 100, observe_minutes: 60, gates: [error_rate, latency_p95, saturation, checkout_ratio] }
+signals: # scoped to the canary track; compare with track="stable"
+  error_rate: 'sum(rate(http_requests_total{app="checkout",track="canary",status=~"5.."}[5m])) / sum(rate(http_requests_total{app="checkout",track="canary"}[5m]))'
+  latency_p95: 'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{app="checkout",track="canary"}[5m])))'
+  checkout_ratio: 'sum(rate(checkout_completed_total[10m])) / sum(rate(checkout_completed_total[10m] offset 1w))'
 abort_thresholds:
   error_rate_max: 0.01
-  latency_p95_max_ms: 500
-  latency_p99_max_ms: 1500
-  business_kpi_drop_max: 0.05
-
-halt_authority: [<operator-handle>, <observer-handle>, <on-call-commander>]
-halt_procedure:
-  - freeze traffic weight at the current value; do not continue expansion
-  - snapshot metrics, logs, and pod state before any restart
-  - page the halt authority list with the evidence bundle
-
+  latency_p95_max_seconds: 0.5
+  checkout_ratio_min: 0.95
+halt:
+  authority: [<operator>, <observer>, <on-call lead>]
+  procedure:
+    - freeze traffic weight; do not expand
+    - snapshot metrics, logs, and pod state before any restart
+    - notify the halt authority with the evidence
 rollback:
-  type: revert_deployment
-  rto_minutes: 15
   steps:
-    - kubectl rollout undo deployment/checkout-service
-    - kubectl rollout status deployment/checkout-service --timeout=600s
-    - disable feature flag payment_retry_v2
-    - verify error_rate and latency_p95 return to baseline within 10 minutes
-  forward_fix_fallback: "if rollback breaks queue consumers, roll forward with branch hotfix/payment-retry-compat"
-  data_compatibility: "no schema change; new code tolerates old rows and old code tolerates new events"
+    - disable flag payment_retry_v2  # requires approval
+    - kubectl -n production rollout undo deployment/checkout-service  # requires approval
+    - kubectl -n production rollout status deployment/checkout-service --timeout=600s
+    - confirm error_rate and latency_p95 back at baseline
+  not_reverted_by_rollback: "ConfigMaps, Secrets, flags, rows written by the new version"
+  data_compatibility: "no schema change; old code tolerates rows written by new code"
+  forward_fix: "if rollback breaks queue consumers, ship a compatibility hotfix"
 ```
 
----
+With a progressive-delivery controller, use its commands for expansion and
+halting instead (for example `kubectl argo rollouts promote checkout-service`
+or `kubectl argo rollouts abort checkout-service` with Argo Rollouts), each
+with approval. A plain Kubernetes Deployment cannot split traffic by
+percentage on its own.
 
-## 4. Health-Check Verification Pattern & Rollback Drill
+## Gate check (read-only)
 
-The observer executes this command set verbatim at every stage gate. Any gate
-failure triggers the halt procedure, then the rollback steps.
+Run at every stage gate. It exits non-zero when the gate fails, including when
+the signal is missing.
 
 ```bash
-NAMESPACE="production"; DEPLOY="checkout-service"
+set -euo pipefail
+NS=production; DEPLOY=checkout-service; MAX=0.01
+PROM_URL="${PROM_URL:?set to the metrics query endpoint}"
 
-# 1. Rollout progress and pod health
-kubectl -n "$NAMESPACE" rollout status "deployment/$DEPLOY" --timeout=300s
-kubectl -n "$NAMESPACE" get pods -l app="$DEPLOY" -o wide
-
-# 2. HTTP health probe through the public seam
-curl -fsS -o /dev/null -w 'status=%{http_code} latency=%{time_total}s\n' \
+kubectl -n "$NS" rollout status "deployment/$DEPLOY" --timeout=300s
+curl -fsS -o /dev/null -w 'healthz status=%{http_code} time=%{time_total}s\n' \
   https://api.example.com/healthz
 
-# 3. Error-rate gate: exits non-zero when the abort threshold is exceeded
-ERROR_RATE=$(curl -fsS '<metrics-endpoint>/api/v1/query' \
-  --data-urlencode 'query=sum(rate(http_requests_total{status=~"5.."}[5m]))/sum(rate(http_requests_total[5m]))' \
-  | jq -r '.data.result[0].value[1]')
-if awk -v r="$ERROR_RATE" 'BEGIN { exit !(r < 0.01) }'; then
-  echo "GATE PASS: error_rate=$ERROR_RATE"
+RATE=$(curl -fsS "$PROM_URL/api/v1/query" \
+  --data-urlencode 'query=sum(rate(http_requests_total{app="checkout",track="canary",status=~"5.."}[5m])) / sum(rate(http_requests_total{app="checkout",track="canary"}[5m]))' \
+  | jq -r '.data.result[0].value[1] // empty')
+case "$RATE" in
+  ""|NaN|+Inf|-Inf) echo "GATE FAIL: no usable error-rate sample: '$RATE'"; exit 1 ;;
+esac
+if awk -v r="$RATE" -v max="$MAX" 'BEGIN { exit !(r + 0 < max + 0) }'; then
+  echo "GATE PASS: error_rate=$RATE"
 else
-  echo "GATE FAIL: error_rate=$ERROR_RATE >= 0.01 — halt and roll back"
+  echo "GATE FAIL: error_rate=$RATE is at or above $MAX; halt"
+  exit 1
 fi
 ```
 
-### Rollback Drill Checklist (staging, before production authorization)
-
-- [ ] Roll forward to the candidate revision, execute `kubectl rollout undo`,
-      and measure time-to-baseline.
-- [ ] Confirm measured rollback time is within the RTO (default 15 minutes);
-      record the actual value.
-- [ ] Verify the old revision serves new-format data correctly (backward
-      compatibility proof).
-- [ ] Verify the feature-flag disable path works without a redeploy.
-- [ ] Confirm the halt procedure preserves logs and metrics snapshots.
-- [ ] Record drill evidence (timestamps, command output) in the deployment
-      handoff.
-
----
-
-## 5. Abort Threshold, Cohort Sizing & RTO Mathematics
-
-$$\text{Abort} = \left( \frac{\#\{r : \text{status}(r) \ge 500\}}{\#\{r\}} > \tau_{\text{err}} \right) \;\lor\; \left( P95(t_{\text{req}}) > \tau_{p95} \right) \;\lor\; \left( \text{KPI} < (1 - \tau_{\text{kpi}}) \times \text{baseline} \right)$$
-
-$$\text{cohorts} = [c_1, c_2, \dots, c_n] = [5\%, 25\%, 50\%, 100\%], \qquad \text{promote}(c_i \to c_{i+1}) \Rightarrow \bigwedge_{s \in \text{gates}(c_i)} \text{pass}(s) \;\wedge\; t_{\text{observe}}(c_i) \ge t_{\min}$$
-
-$$\text{RTO} = t_{\text{rollback\_complete}} - t_{\text{abort\_decision}} \;\le\; 15\,\text{min}$$
-
-$$\forall\, \text{stage } s: \quad \text{execute}(s) \Rightarrow \text{evidence}(s) \;\wedge\; \text{timestamp}(s) \;\wedge\; \text{operator}(s) \text{ recorded}$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **Explicit Authorization**: Do **NOT** deploy to production, rotate
-  credentials, or run destructive commands without explicit authorization.
-  Execute only the authorized scope; expanding beyond it requires new
-  authorization recorded in the plan.
-- **Backward-Compatible Change Shape**: Prefer backward-compatible
-  expand-and-contract changes when old and new versions overlap in
-  production.
-- **No Assumed Schema Safety**: Never assume a schema rollback is
-  automatically safe; rehearse it or document the forward-fix path.
-- **Single-Agent Executable**: Optional release-engineer delegation can
-  accelerate preparation; one agent can complete this workflow independently.
-
-### Security Invariants
-
-- **Secret-Free Artifacts**: Keep secrets out of plans, logs, screenshots,
-  and chat transcripts. Reference secrets by environment variable or vault
-  path name only — never by value.
-- **Sanitized Evidence**: Evidence bundles must be sanitized before sharing:
-  redact tokens, session identifiers, and customer payloads.
-- **Authenticated Tooling Only**: Deployment credentials are used only
-  through the platform's authenticated tooling. Never echo kubeconfig
-  contents or cloud tokens into plan documents or terminal logs shared in
-  the handoff.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Two rollback layers exist and must not be conflated: **repository rollback**
-(files created or modified while authoring the plan) and **deployment
-rollback** (platform state changed during authorized execution). Before
-creating or modifying files, capture a baseline list of modified and
-untracked files. If any verification command in Section 8 fails and cannot be
-resolved within 2 iterations, execute targeted repository rollback restricted
-ONLY to files created or modified during this run:
+Staging rollback drill, proposed to the user and run only after approval:
 
 ```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
+CANDIDATE="${CANDIDATE:?set to the candidate image reference with its digest}"
+kubectl -n staging set image deployment/checkout-service app="$CANDIDATE"  # requires approval
+kubectl -n staging rollout status deployment/checkout-service --timeout=600s
+kubectl -n staging rollout undo deployment/checkout-service  # requires approval
+kubectl -n staging rollout status deployment/checkout-service --timeout=600s
 ```
 
-For deployment rollback, execute the plan's `rollback.steps` exactly as
-written and verify time-to-baseline against the RTO. Never roll back a
-deployment that was not part of the authorized scope, and never improvise
-platform actions outside the plan. After either rollback, output the exact
-error trace and state failure causes.
+Record the start and end time of the undo and the time until the gate check
+passes again.
 
----
+## Guardrails
 
-## 8. Verification Plan & Deployment Toolchain Commands
+- Revert or delete only files you created or changed in this session. Never
+  discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions.
+  Here that means every environment mutation: deploys, traffic shifts, flag
+  changes, scaling, restarts, rollbacks, and drills, in any environment.
+- Never weaken a gate, raise a threshold mid-rollout, or skip an observation
+  window to keep a rollout moving.
+- Never assume a schema rollback is safe; verify compatibility or document the
+  forward fix.
+- Keep secrets out of plans, logs, and reports. Reference them by name or
+  vault path only. Redact tokens, session IDs, and customer data from evidence.
 
-Execute the following commands using project-local runners; adapt to the
-project's declared deployment platform:
+## Verification
 
-```bash
-# 1. Confirm artifact traceability: digest matches CI build for the revision
-kubectl get deployment checkout-service -o jsonpath='{.spec.template.spec.containers[0].image}'
+Use the project's own commands, run separately.
 
-# 2. Confirm tests pass at the release revision
-npm run test
+1. Artifact traceability: the running or candidate image digest matches the CI
+   build output for the commit (for example
+   `kubectl -n production get deployment checkout-service -o jsonpath='{.spec.template.spec.containers[0].image}'`).
+2. The project's test command passes at the release commit.
+3. The gate check passes at each stage, with recorded values and timestamps.
+4. If a drill was approved and run, the measured time back to baseline is
+   within the target the project sets.
+5. The plan and report contain no secret values:
+   `grep -nEi '(password|token|secret|api[_-]?key)[[:space:]]*[:=]' rollout-plan.yaml`
+   prints nothing, or each hit is a reference by name.
 
-# 3. Rehearse rollback in staging and measure time-to-baseline
-kubectl rollout undo deployment/checkout-service --namespace=staging
-kubectl rollout status deployment/checkout-service --namespace=staging --timeout=600s
+## Report
 
-# 4. Execute the stage-gate health checks (Section 4) at the current cohort
-curl -fsS -o /dev/null -w 'status=%{http_code} latency=%{time_total}s\n' https://api.example.com/healthz
+Return the plan, then a verification report. Save it where the project keeps
+release records (for example `docs/releases/`), or return it in the reply if
+there is no convention.
 
-# 5. Confirm the plan document contains no secret values before sharing
-grep -nEi '(password|token|secret|api[_-]?key): *[^< ]' rollout-plan.yaml \
-  && echo "REDACT BEFORE SHARE" || echo "CLEAN"
+<!-- handoff: verification-report -->
+```markdown
+# Verification report: <service> <revision> to <environment>
+
+## Scope
+
+Artifact, digest, revision, environments, stages approved and executed, and
+who approved them.
+
+## Commands and results
+
+Each preflight and gate command with timestamp, observed value, threshold,
+and PASS or FAIL. Drill commands and measured time back to baseline.
+
+## Evidence
+
+Links or paths to metric snapshots, logs, and rollout history (redacted).
+
+## Limitations
+
+Signals not available, stages not executed, and anything not verified.
+
+## Handoff
+
+**Changed contract:** behavior or configuration that changed for users or consumers.
+**Files / systems affected:** services, environments, flags, and data stores.
+**Evidence and tests:** tests at the revision and gate results per stage.
+**Risks / rollback:** open risks, rollback steps, and what rollback does not revert.
+**What the next agent needs:** current stage, pending approvals, next action.
 ```
 
----
+## Optional delegation
 
-## 9. Completion Report
-
-Report the artifact and revision with digest, environments touched, preflight
-checks with evidence, rollout gates and observed signal values at each
-cohort, abort threshold evaluations, rollback readiness with drill evidence
-(including measured time-to-baseline against the RTO), exact commands
-executed with timestamps, operator and observer identities, and anything left
-unverified.
+The `release-engineer` subagent can audit release readiness and the change
+set in parallel. The `migration-planner` subagent can check migration
+compatibility. The `infrastructure-reviewer` subagent can review manifests
+touched by the release. One agent can complete this workflow alone.
