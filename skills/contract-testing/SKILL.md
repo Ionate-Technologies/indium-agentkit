@@ -1,505 +1,240 @@
 ---
 name: contract-testing
-description: "Design and implement consumer-driven contract tests (Pact, MSW, Playwright) to verify interface compatibility between microservices and frontend/backend boundaries."
+description: "Write consumer-driven contract tests with Pact (consumer tests, provider verification with state handlers, broker publishing, and can-i-deploy gates) and keep frontend mocks aligned, so interface breaks between services or between frontend and backend fail in CI instead of production. Use when adding or changing an interface between independently deployed services or apps. Not for designing the API itself (use the api-design skill)."
 ---
 
 # Contract Testing
 
-Design, implement, and verify consumer-driven contract tests between
-independent services or frontend/backend API boundaries. The default tooling
-is **Pact** (consumer contract tests, provider verification, and a Pact
-Broker for publication and deployment gating), **MSW** for frontend network
-seams, and **Playwright request contexts** where the project already tests
-at the HTTP seam. Contract verification must prevent breaking API changes
-without requiring a full end-to-end environment deployment.
+Catch interface breaks between independently deployed consumers and providers
+without a full end-to-end environment. The stance is **consumer perspective,
+interface shape only**: contracts record what the consumer actually sends and
+reads, and they verify structure, not business logic.
 
-Before writing any test, inspect the repository and adapt to existing
-conventions: read the API specification (OpenAPI, GraphQL schema, or
-protobuf definitions), existing contract or mock directories (`pacts/`,
-`mocks/`, `src/mocks/`), the consumer's API client modules, the producer's
-route handlers, and the CI pipeline to see where verification must plug in.
-Reuse the project's contract tooling, fixture factories, and error envelope
-instead of inventing parallel harnesses.
+## When to use
 
----
+- A consumer (web app, mobile app, service) and a provider deploy independently
+  and a change to either could break the other.
+- Adding a new interaction, error case, or field that crosses such a boundary.
+- Wiring provider verification, broker publishing, or `can-i-deploy` into CI.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Designing or changing the API contract itself: use the `api-design` skill.
+- Implementing the provider endpoint: use the `backend-api` skill.
+- A third-party API you do not control cannot run provider verification: use
+  the `third-party-integration` skill and test against recorded or documented
+  responses.
+- A contract test that passes and fails on the same code: use the
+  `flaky-test-triage` skill.
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Add a Pact contract between billing-web
-   and invoice-service for fetching a single invoice, including the 404
-   case"*), the agent **must automatically infer and populate**
-   `boundary_spec`, `interaction_spec`, and `broker_context` from the
-   user's text and the existing repository conventions.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ContractTestingContextManifest",
-  "type": "object",
-  "required": ["boundary_spec", "interaction_spec"],
-  "properties": {
-    "boundary_spec": {
-      "type": "object",
-      "required": ["consumer", "producer", "transport"],
-      "properties": {
-        "consumer": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-        "producer": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-        "transport": { "type": "string", "enum": ["http_rest", "graphql", "async_message", "grpc"] },
-        "contract_tool": { "type": "string", "enum": ["pact", "msw", "playwright_request", "custom_mock"], "default": "pact" }
-      }
-    },
-    "interaction_spec": {
-      "type": "object",
-      "required": ["interactions"],
-      "properties": {
-        "interactions": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["description", "method", "path", "response_status"],
-            "properties": {
-              "description": { "type": "string" },
-              "provider_state": { "type": "string" },
-              "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-              "path": { "type": "string", "pattern": "^/(?!.*(?:^|/)\\.\\.?(?:/|$)).*$" },
-              "request_headers": { "type": "object" },
-              "request_body": { "type": ["object", "null"] },
-              "response_status": { "type": "integer", "minimum": 100, "maximum": 599 },
-              "response_body": { "type": ["object", "null"] },
-              "dynamic_fields": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Fields that must use type or regex matchers, never exact values (timestamps, UUIDs, generated IDs)."
-              }
-            }
-          }
-        }
-      }
-    },
-    "broker_context": {
-      "type": "object",
-      "required": ["publish_mode", "can_i_deploy_required"],
-      "properties": {
-        "publish_mode": { "type": "string", "enum": ["broker", "artifact_storage", "none"], "default": "none" },
-        "broker_url": { "type": "string" },
-        "can_i_deploy_required": { "type": "boolean", "default": false },
-        "tags": { "type": "array", "items": { "type": "string" }, "default": ["main"] }
-      }
-    }
-  }
-}
-```
+- The boundary: which side calls, which side owns the interface, and the
+  participant names a Pact Broker already knows.
+- The API contract (OpenAPI, GraphQL schema, protobuf) and the consumer's client
+  modules that cross the boundary.
+- Existing contract tooling: `@pact-foundation/pact` version, `pacts/`
+  directories, MSW handlers, fixture factories, and the error envelope.
+- How the provider starts in tests and seeds its own test database.
+- CI: where consumer tests run, whether a broker exists, and how secrets reach jobs.
+- Test commands from `AGENTS.md`, package scripts, or the `Makefile`.
 
-### Automatic Natural Language Inference & Safety Validation Rules
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+1. **Inventory consumer calls.** List every client function that crosses the
+   boundary. Each gets at least one success interaction and one error-envelope
+   interaction (for example 404 or 422).
+2. **Write consumer interactions from the consumer's side.** Include only the
+   request fields the consumer sends and the response fields it reads. Give each
+   interaction a provider state (`invoice inv_42 exists`) so the provider can
+   arrange data deterministically.
+3. **Use matchers for dynamic values.** Ids, timestamps, tokens, and generated
+   values use type or regex matchers. Exact literals are for values the consumer
+   genuinely pins, such as enum-like error codes.
+4. **Drive the real client.** Point the consumer's actual client code at the
+   Pact mock server; never assert the mock against itself.
+5. **Check the generated pact files.** They are generated output: regenerate,
+   never hand-edit. Run the suite twice and confirm the files are identical (see
+   Verification).
+6. **Verify the provider in isolation.** Replay pacts against a local or
+   ephemeral provider instance with its own test database. Implement a state
+   handler for every provider state any consumer uses. Inject test credentials
+   with a request filter. Never target production.
+7. **Select pacts by branch and environment.** Use
+   `consumerVersionSelectors` such as `{ mainBranch: true }`,
+   `{ deployedOrReleased: true }`, and `{ matchingBranch: true }`. The tag-based
+   forms (`{ tag: 'main', latest: true }`, `--tag`) are the older API; use them
+   only if the broker is too old for branches and environments. Turn on pending
+   pacts (`enablePending`) so a new consumer expectation does not break the
+   provider's main build before it is implemented.
+8. **Publish and gate in CI.** Consumers publish pacts with `--branch` and their
+   version. Providers verify on their own pull requests, and the broker can
+   trigger verification when a changed pact is published. Before deploying, run
+   `can-i-deploy`; after a deployment succeeds, record it with
+   `record-deployment` (or `record-release` for mobile apps and libraries).
+   Without a broker, the provider can verify pact files from a shared artifact
+   (the `pactUrls` option), but there is no `can-i-deploy` gate.
+9. **Align frontend mocks.** MSW handlers and similar mocks are not verified
+   against the provider. Reuse the pact's example payloads or generate both from
+   the same fixtures so mock drift shows up in review.
 
-- **`consumer` / `producer`**: Extracted from the prompt's service names or
-  inferred from the repository layout (for example a `web/` application
-  consuming an `api/` service). Names are normalized to kebab-case
-  pacticipant names already known to the broker.
-- **`transport`**: Defaults to `http_rest` unless a message queue, GraphQL
-  schema, or protobuf definition is detected at the boundary.
-- **`contract_tool`**: Detected from dependencies (`@pact-foundation/pact`,
-  `msw`, `@playwright/test`). Defaults to `pact` for service-to-service
-  boundaries and `msw` for frontend network seams.
-- **`interactions`**: Derived from the consumer's API client functions.
-  Every client function that crosses the boundary gets at least one success
-  interaction and one error-envelope interaction.
-- **`dynamic_fields`**: Auto-populated with `id`, `*Id`, `createdAt`,
-  `updatedAt`, `requestId`, and any field whose value is a timestamp or
-  UUID. These fields MUST use type or regex matchers.
-- **`broker_context`**: Defaults to `publish_mode: "broker"` when a broker
-  URL is configured in the environment or CI, otherwise `artifact_storage`.
-- **Path safety**: every interaction `path` MUST NOT contain traversal
-  segments (`.` or `..`); normalize and ABORT execution immediately if a
-  traversal attempt is detected.
-- **Safety validation**: ABORT execution immediately if the manifest
-  hardcodes a timestamp, UUID, or random token as an exact-match assertion,
-  or if provider verification is pointed at a production base URL. Provider
-  verification targets local or ephemeral test environments only.
+## Reference: consumer test and provider verification (illustrative)
 
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
-
-### Step 1: Boundary & Convention Discovery
-
-1. Read `AGENTS.md`, the API specification, the consumer's API client
-   modules, and the producer's route handlers.
-2. Identify the exact consumer/producer boundary: which service initiates
-   requests, which owns the interface, and which pacticipant names the
-   broker already knows.
-3. Inventory existing contract artifacts (`pacts/`, MSW handlers, recorded
-   fixtures) so new interactions extend them instead of forking them.
-
-### Step 2: Interaction Contract Definition (Consumer Perspective)
-
-1. Define each interaction from the consumer's perspective: HTTP method,
-   path, headers, query parameters, request body schema, expected response
-   status code, and response body schema.
-2. Attach a provider state to every interaction (for example `invoice
-   inv_42 exists and is payable`) so the producer can arrange fixture data
-   deterministically.
-3. Cover the error envelope explicitly: at least one 4xx interaction per
-   resource so the consumer's error handling is part of the contract.
-
-### Step 3: Consumer Contract Tests & Artifact Generation
-
-1. Write consumer contract tests with the project's contract tool (Pact,
-   MSW, Supertest, or a custom mock verifier), driving the real consumer
-   client code against the mock — never testing the mock against itself.
-2. Use type matchers and regex matchers for every dynamic value; exact
-   literals are reserved for enum-like fields the consumer genuinely pins.
-3. Generate verified contract artifacts (Pact JSON files) into the
-   project's contract directory and confirm they serialize deterministically.
-
-### Step 4: Producer Verification in Isolation
-
-1. Implement provider verification that replays recorded contracts against
-   the real producer endpoints in an isolated test environment with its own
-   database or fixture seeding.
-2. Implement state handlers that arrange and tear down fixture data for
-   every provider state used by any consumer.
-3. Publish verification results back to the broker with the provider
-   version so deployment gating has evidence to evaluate.
-
-### Step 5: Edge-Case & Dynamic-Value Matching
-
-1. Verify matching behavior for edge cases: missing optional parameters,
-   null values, empty collections, error envelopes, dynamic IDs, and type
-   constraints (a string that must stay a string).
-2. Confirm no assertion depends on wall-clock time, random UUIDs, or
-   environment-specific host names; replay the suite twice and diff the
-   generated pact files to prove determinism.
-
-### Step 6: Contract Publication
-
-1. Publish contracts to the Pact Broker (or repository artifact storage
-   when no broker is configured) with the consumer version and branch tag.
-2. Tag the mainline contract set so `can-i-deploy` can compare against the
-   currently deployed versions of each participant.
-
-### Step 7: CI Integration of Verification Gates
-
-1. Add consumer contract test execution and publication to the consumer's
-   pull-request checks.
-2. Add provider verification to the producer's pull-request checks, wired
-   to fetch pacts by consumer version selectors (`main`, `deployed`).
-3. Add a `can-i-deploy` gate to the deployment pipeline when the project
-   requires broker-driven release gating.
-
-### Step 8: Evidence, Drift & Coverage Reporting
-
-1. Record which endpoints of the boundary carry verified interactions and
-   which do not; every consumer-invoked endpoint without a contract is a
-   coverage gap to report.
-2. Report breaking drift detected during verification (removed fields, type
-   changes, tightened constraints) with the exact interaction that failed.
-
----
-
-## 3. Reference Implementation: Pact Consumer Test & Provider Verification
+pact-js with Vitest. Recent pact-js versions also export `PactV4`, which uses a
+builder-style `addInteraction()` API; use PactV3 or PactV4 per your installed
+version. In MatchersV3, `regex` takes the pattern first and the example second.
 
 ```typescript
-import { PactV3, MatchersV3, SpecificationVersion } from '@pact-foundation/pact';
+import { PactV3, MatchersV3 } from '@pact-foundation/pact';
 import { describe, it, expect } from 'vitest';
-import { fetchInvoice, type Invoice } from '../src/clients/invoiceClient';
+import { fetchInvoice } from '../src/clients/invoiceClient';
 
-const { like, eachLike, string, regex, iso8601DateTime, uuid, decimal, integer } = MatchersV3;
+const { like, eachLike, string, regex, uuid, decimal, integer } = MatchersV3;
+const pact = new PactV3({ consumer: 'billing-web', provider: 'invoice-service', dir: 'pacts' });
+const headers = { Accept: 'application/json', Authorization: regex('^Bearer .+$', 'Bearer test-token') };
 
-const provider = new PactV3({
-  consumer: 'billing-web',
-  provider: 'invoice-service',
-  spec: SpecificationVersion.SPECIFICATION_VERSION_V3,
-  dir: 'pacts',
-  logLevel: 'warn',
-});
-
-describe('billing-web -> invoice-service contract', () => {
-  it('GET /api/invoices/:id returns a typed invoice', () => {
-    provider
-      .given('invoice inv_42 exists and is payable')
-      .uponReceiving('a request for a single invoice')
-      .withRequest({
-        method: 'GET',
-        path: regex('/api/invoices/inv_42', '\\/api\\/invoices\\/[A-Za-z0-9_\\-]+'),
-        headers: {
-          Accept: like('application/json'),
-          Authorization: regex('Bearer <token>', '^Bearer .+$'),
-        },
-      })
+describe('billing-web -> invoice-service', () => {
+  it('gets one invoice', () => {
+    pact
+      .given('invoice inv_42 exists')
+      .uponReceiving('a request for invoice inv_42')
+      .withRequest({ method: 'GET', path: '/api/invoices/inv_42', headers })
       .willRespondWith({
         status: 200,
-        headers: { 'Content-Type': regex('application/json; charset=utf-8', 'application\\/json.*') },
+        headers: { 'Content-Type': regex('^application/json', 'application/json; charset=utf-8') },
         body: {
           id: string('inv_42'),
           customerId: uuid('8f3a2b1c-0000-4000-8000-000000000000'),
-          currency: regex('USD', '^[A-Z]{3}$'),
+          currency: regex('^[A-Z]{3}$', 'USD'),
           total: decimal(129.99),
-          lineCount: integer(1),
-          issuedAt: iso8601DateTime('2026-01-15T09:30:00Z'),
-          lines: eachLike(
-            { sku: like('sku_pro'), quantity: integer(1), unitPrice: decimal(129.99) },
-            { min: 1 },
-          ),
+          issuedAt: regex('^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$', '2026-01-15T09:30:00Z'),
+          lines: eachLike({ sku: like('sku_pro'), quantity: integer(1) }),
         },
       });
 
-    return provider.executeTest(async (mockServer) => {
-      const invoice: Invoice = await fetchInvoice(mockServer.url, 'inv_42', '<token>');
+    return pact.executeTest(async (mockServer) => {
+      const invoice = await fetchInvoice(mockServer.url, 'inv_42', 'test-token');
       expect(invoice.id).toBe('inv_42');
-      expect(typeof invoice.total).toBe('number');
-      expect(Array.isArray(invoice.lines)).toBe(true);
-      expect(invoice.lines.length).toBeGreaterThanOrEqual(1);
+      expect(invoice.lines.length).toBeGreaterThan(0);
     });
   });
 
-  it('GET /api/invoices/:id returns the shared 404 envelope when missing', () => {
-    provider
+  it('gets the shared 404 envelope for a missing invoice', () => {
+    pact
       .given('invoice inv_missing does not exist')
       .uponReceiving('a request for a missing invoice')
-      .withRequest({
-        method: 'GET',
-        path: regex('/api/invoices/inv_missing', '\\/api\\/invoices\\/[A-Za-z0-9_\\-]+'),
-        headers: { Accept: like('application/json') },
-      })
+      .withRequest({ method: 'GET', path: '/api/invoices/inv_missing', headers })
       .willRespondWith({
         status: 404,
-        headers: { 'Content-Type': regex('application/json; charset=utf-8', 'application\\/json.*') },
-        body: {
-          error: {
-            code: string('INVOICE_NOT_FOUND'),
-            message: like('Invoice not found.'),
-            requestId: uuid('00000000-0000-4000-8000-000000000000'),
-          },
-        },
+        body: { error: { code: 'INVOICE_NOT_FOUND', message: like('Invoice not found.') } },
       });
 
-    return provider.executeTest(async (mockServer) => {
-      await expect(fetchInvoice(mockServer.url, 'inv_missing', '<token>'))
-        .rejects.toMatchObject({ status: 404, code: 'INVOICE_NOT_FOUND' });
+    return pact.executeTest(async (mockServer) => {
+      await expect(fetchInvoice(mockServer.url, 'inv_missing', 'test-token')).rejects.toMatchObject({ status: 404 });
     });
   });
 });
 ```
-
-Provider-side verification replays every published pact against the real
-service with deterministic fixture seeding:
 
 ```typescript
 import { Verifier } from '@pact-foundation/pact';
-import { describe, it } from 'vitest';
-import { seedInvoice, purgeInvoice } from './fixtures/invoices';
+import { it } from 'vitest';
+import { seedInvoice, deleteInvoice } from './fixtures/invoices';
 
-describe('invoice-service provider verification', () => {
-  it('replays every published consumer contract against the real service', async () => {
-    const verifier = new Verifier({
-      provider: 'invoice-service',
-      providerBaseUrl: process.env.PROVIDER_BASE_URL ?? 'http://127.0.0.1:8081',
-      pactBrokerUrl: process.env.PACT_BROKER_BASE_URL,
-      pactBrokerToken: process.env.PACT_BROKER_TOKEN, // injected by CI; never committed
-      publishVerificationResult: process.env.CI === 'true',
-      providerVersion: process.env.GIT_SHA ?? 'local-dev',
-      consumerVersionSelectors: [{ tag: 'main', latest: true }, { deployed: true }],
-      enablePending: true,
-      stateHandlers: {
-        'invoice inv_42 exists and is payable': async () => {
-          await seedInvoice({ id: 'inv_42', status: 'payable', total: 129.99 });
-        },
-        'invoice inv_missing does not exist': async () => {
-          await purgeInvoice('inv_missing');
-        },
-      },
-      requestFilter: (req, _res, next) => {
-        req.headers['Authorization'] = 'Bearer <token>';
-        next();
-      },
-    });
-
-    await verifier.verifyProvider();
-  }, 120000);
-});
+it('honours published consumer contracts', async () => {
+  await new Verifier({
+    provider: 'invoice-service',
+    providerBaseUrl: 'http://127.0.0.1:8081', // the test instance this suite started
+    pactBrokerUrl: process.env.PACT_BROKER_BASE_URL,
+    pactBrokerToken: process.env.PACT_BROKER_TOKEN, // from the CI secret store
+    providerVersion: process.env.GIT_SHA,
+    providerVersionBranch: process.env.GIT_BRANCH,
+    publishVerificationResult: process.env.CI === 'true',
+    consumerVersionSelectors: [{ mainBranch: true }, { deployedOrReleased: true }, { matchingBranch: true }],
+    enablePending: true,
+    stateHandlers: {
+      'invoice inv_42 exists': () => seedInvoice({ id: 'inv_42', total: 129.99 }),
+      'invoice inv_missing does not exist': () => deleteInvoice('inv_missing'),
+    },
+    requestFilter: (req, _res, next) => {
+      req.headers.authorization = 'Bearer test-token'; // accepted by the test instance only
+      next();
+    },
+  }).verifyProvider();
+}, 120_000);
 ```
 
----
-
-## 4. Broker Publication, can-i-deploy & MSW Seam Pattern
-
-Publish contracts and gate deployment on verification status:
+Broker steps for CI (illustrative; `pact-broker` is the Pact Broker CLI, and
+`record-deployment` needs the environment to exist in the broker):
 
 ```bash
-# 1. Publish the consumer contract with its version and branch tag
-npx --no-install pact-broker publish pacts \
-  --consumer-app-version "${GIT_SHA}" \
-  --tag "${GIT_BRANCH}" \
-  --broker-base-url "${PACT_BROKER_BASE_URL}" \
-  --broker-token "${PACT_BROKER_TOKEN}"
+pact-broker publish pacts --consumer-app-version "$GIT_SHA" --branch "$GIT_BRANCH" \
+  --broker-base-url "$PACT_BROKER_BASE_URL" --broker-token "$PACT_BROKER_TOKEN"
 
-# 2. Record the deployed version so provider selectors can target it
-npx --no-install pact-broker record-deployment \
-  --pacticipant billing-web --version "${GIT_SHA}" --environment production
+pact-broker can-i-deploy --pacticipant invoice-service --version "$GIT_SHA" \
+  --to-environment production --retry-while-unknown 6 --retry-interval 30
 
-# 3. Gate the release: refuse to deploy until all relevant pacts are verified
-npx --no-install pact-broker can-i-deploy \
-  --pacticipant invoice-service \
-  --version "${GIT_SHA}" \
-  --to-environment production \
-  --retry-while-unknown 6 \
-  --retry-interval 30
+# Only after the deployment has succeeded:
+pact-broker record-deployment --pacticipant invoice-service --version "$GIT_SHA" \
+  --environment production
 ```
 
-MSW handler mirroring the same contract for the frontend development seam:
+## Guardrails
 
-```typescript
-import { http, HttpResponse } from 'msw';
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Provider verification runs against local or ephemeral test instances only,
+  never production URLs or production data.
+- Ask before outward-facing broker actions from a local machine: publishing to
+  a shared broker, recording deployments or releases, or changing webhooks.
+  These normally belong in CI.
+- Never loosen a matcher, delete an interaction, or disable verification to make
+  a build pass. A failed verification is a real incompatibility; use pending
+  pacts for expectations the provider has not built yet.
+- Contracts verify interface shape. Keep pricing rules, workflow outcomes, and
+  other business logic in unit and integration tests.
+- Examples use synthetic data. Broker tokens come from CI secrets and are never
+  committed or printed.
 
-export const invoiceHandlers = [
-  http.get('/api/invoices/:id', ({ params }) => {
-    if (params.id === 'inv_missing') {
-      return HttpResponse.json(
-        { error: { code: 'INVOICE_NOT_FOUND', message: 'Invoice not found.', requestId: 'req_synth_1' } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      id: params.id,
-      customerId: 'cus_synth_1',
-      currency: 'USD',
-      total: 129.99,
-      lineCount: 1,
-      issuedAt: '2026-01-15T09:30:00.000Z',
-      lines: [{ sku: 'sku_pro', quantity: 1, unitPrice: 129.99 }],
-    });
-  }),
-];
-```
+## Verification
 
----
+Use the project's own commands (the script names below are illustrative). Run
+each check separately and report its real result; never chain alternatives
+with `||`.
 
-## 5. Contract Invariants & Coverage Mathematics
+- Consumer contract tests pass and write pact files.
+- Determinism: the second run produces identical pact files.
 
-Matcher stability — every dynamic field carries a matcher; no hardcoded
-timestamps or UUIDs appear in exact-match assertions:
+  ```bash
+  npm run test:contract
+  snapshot="$(mktemp -d)"
+  cp -R pacts "$snapshot/"
+  npm run test:contract
+  diff -r "$snapshot/pacts" pacts
+  ```
 
-$$\forall f \in \text{ResponseFields}:\quad \text{dynamic}(f) \;\Rightarrow\; \text{matcher}(f) \in \{\text{type}, \text{regex}, \text{iso8601}, \text{uuid}, \text{decimal}, \text{integer}\}$$
+  No `diff` output means the files are stable. The snapshot lives in a temporary
+  directory outside the repository.
+- Provider verification passes against the local test instance, with every
+  provider state handled (an unhandled state is a failure, not a skip).
+- The test code passes the project's type check and lint.
 
-Contract coverage ratio across the consumer-invoked surface:
+## Report
 
-$$\text{coverage} = \frac{\#\{\text{endpoints with } \ge 1 \text{ verified interaction}\}}{\#\{\text{endpoints the consumer actually invokes}\}} \ge 0.9$$
+- **Boundary:** consumer, provider, transport, and pact-js version.
+- **Interactions:** each one, its provider state, and its matcher strategy.
+- **Coverage gaps:** consumer-invoked endpoints with no verified interaction.
+- **Drift found:** failing interactions with the exact mismatch.
+- **CI and broker:** what was wired (publish, verify, can-i-deploy, record-deployment).
+- **Not verified:** checks that could not run and why.
 
-Verification replay determinism — identical provider versions yield
-identical verdicts:
+## Optional delegation
 
-$$\forall \text{ replays } r_1, r_2 \text{ of contract } c \text{ against provider } v:\quad \text{verdict}(c, v, r_1) = \text{verdict}(c, v, r_2)$$
-
-Deployment gate — a participant version is deployable only when the broker
-confirms compatibility with everything currently deployed:
-
-$$\text{deployable}(p, v) \iff \text{can-i-deploy}(p, v, \text{target environment}) = \text{success}$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **Interface Shape, Not Business Logic**: Contract tests verify interface
-  structure and schema constraints (methods, paths, status codes, field
-  types, error envelopes). Do not encode deep business logic, pricing
-  rules, or workflow outcomes into contract assertions — that belongs in
-  unit and integration tests.
-- **No Hardcoded Dynamic Values**: Never hardcode unstable dynamic values
-  (timestamps, random UUIDs, generated IDs, tokens) in exact-matching
-  assertions; use type matchers or regex matchers so contracts survive
-  replay.
-- **Consumer Perspective Only**: Interactions are authored from what the
-  consumer actually sends and needs; do not mirror the producer's full
-  response payload when the consumer reads three fields.
-- **Single-Agent Executable**: An optional reviewer subagent can inspect
-  API contracts in parallel, but one agent can complete this workflow end
-  to end.
-
-### Security Invariants
-
-- **No Production Verification Targets**: Provider verification runs
-  against local or ephemeral test environments only, never against
-  production base URLs or production data.
-- **Synthetic Example Data Only**: Contract examples use synthetic
-  fixtures; never embed real customer data, credentials, or production
-  identifiers in pact files or MSW handlers.
-- **Broker Credentials From CI**: Broker tokens and webhook secrets are
-  injected from the CI secret store at runtime and are never committed to
-  the repository or printed in logs.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying files, the agent must capture a baseline list
-of modified and untracked files. If any verification command in Section 8
-fails and cannot be resolved within 2 iterations, the agent **must execute
-targeted rollback restricted ONLY to files created or modified during this
-run**:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
-After executing targeted rollback, output the exact error trace and state
-failure causes. Never delete pact artifacts or broker publications produced
-by earlier runs; unpublishing broker content is a separate, explicit
-action.
-
----
-
-## 8. Verification Plan & Contract Toolchain Commands
-
-Execute the following commands using project-local runners; adapt to the
-project's declared scripts:
-
-```bash
-# 1. Run consumer contract tests and generate pact artifacts
-npm run test:contract
-
-# 2. Prove replay determinism: run twice and diff the generated pact files
-npm run test:contract && cp -r pacts /tmp/pacts-run1
-npm run test:contract && diff -r /tmp/pacts-run1 pacts
-
-# 3. Run provider verification against the isolated test service
-npm run test:provider
-
-# 4. Type check and lint the test code itself
-npx --no-install tsc --noEmit
-npm run lint
-```
-
----
-
-## 9. Completion Report
-
-Report consumer/producer boundaries tested, contracts generated (with the
-interaction list and matcher strategy per interaction), endpoints verified
-on the producer side, breaking drift detected with the exact failing
-interactions, coverage gaps across the boundary's API surface, broker
-publication and `can-i-deploy` outcomes, CI integration points added, and
-recommendations for closing remaining coverage or gating gaps.
+- The `api-designer` subagent can review the underlying API contract while you
+  write the tests.
+- The `ci-verifier` subagent can confirm the new CI jobs run and report correctly.
+- The `test-writer` subagent can add consumer interactions once the boundary
+  inventory is agreed.
