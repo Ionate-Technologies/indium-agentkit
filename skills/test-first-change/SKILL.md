@@ -1,223 +1,110 @@
 ---
 name: test-first-change
-description: Plan and implement behavior changes, bug fixes, or refactors using Test-Driven Development (TDD) red-green-refactor cycles and behavior-level test seams.
+description: "Implement a behavior change or bug fix test-first: write a failing test at a public seam, confirm it fails for the right reason, make the smallest change that passes, then refactor with the suite green. Use when the desired behavior can be stated as an executable test before coding. Not for exploratory spikes (use the prototype-spike skill) or unknown-cause bugs (use the systematic-debugging skill first)."
 ---
 
-# Test First Change
+# Test-First Change
 
-Plan, author, and implement production code changes, bug fixes, and feature additions using strict Test-Driven Development (TDD) Red-Green-Refactor iteration loops: write a failing behavior test first, confirm expected failure ("Red"), write minimal code to pass ("Green"), and refactor safely while maintaining passing tests.
+Drive a change with the red, green, refactor loop so the new behavior is proven
+by a test that failed before the change and passes after it.
 
-The skill is **contract-first and TDD-validated**: public interface test seams, failing test verification, minimal production changes, zero untested public APIs, and complete regression suite passes are mathematically verified across every iteration cycle.
+## When to use
 
----
+- A new behavior, a rule change, or a bug fix whose expected behavior is clear.
+- The user asks for TDD, or the change is risky enough that a failing test should
+  come first.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- The approach itself is uncertain or throwaway: use the `prototype-spike` skill.
+- The bug's cause is unknown: use the `systematic-debugging` skill, which ends in
+  this same red-green step.
+- Purely visual UI work where a test cannot express the requirement well; use
+  component or end-to-end tests for behavior, and review visuals manually.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Fix the password validation bug using TDD: write a failing test first for special character requirements, then implement the fix"*), the agent **must automatically infer and populate** `change_target`, `test_type`, `test_framework`, and `red_state_verified` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+- The behavior as input and expected output, error, or side effect.
+- The test framework, file layout, naming, and fixtures, learned from `AGENTS.md`
+  and three nearby tests.
+- The command to run a single test and the full suite.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "TestFirstChangeContextManifest",
-  "type": "object",
-  "required": ["change_spec", "tdd_config"],
-  "properties": {
-    "change_spec": {
-      "type": "object",
-      "required": ["change_target", "observable_behavior"],
-      "properties": {
-        "change_target": { "type": "string" },
-        "observable_behavior": { "type": "string" },
-        "test_file_path": { "type": "string" },
-        "production_file_path": { "type": "string" }
-      }
-    },
-    "tdd_config": {
-      "type": "object",
-      "required": ["test_framework"],
-      "properties": {
-        "test_framework": { 
-          "type": "string", 
-          "enum": ["jest", "vitest", "pytest", "cargo_test", "go_test"],
-          "default": "vitest" 
-        },
-        "test_type": { 
-          "type": "string", 
-          "enum": ["unit", "integration", "contract", "e2e"],
-          "default": "unit" 
-        },
-        "require_explicit_red_phase": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
-```
+## Workflow
 
-### Automatic Natural Language Inference & TDD Rules
+1. **State the behavior** in one sentence per case: "Given X, when Y, then Z."
+   Include the error cases that matter.
+2. **Choose the seam.** Test through the most public interface that exercises the
+   behavior cheaply: an exported function, a service method, an HTTP handler, a
+   CLI command, or a rendered component. Avoid testing private helpers; those
+   tests break on every refactor.
+3. **Red: write one failing test** for the first case, matching project style.
+   Run it alone and read the failure. It must fail because the behavior is
+   missing, not because of an import error, a typo, or broken setup. If it passes
+   already, the behavior exists or the test is wrong; find out which before going on.
+4. **Green: make the smallest production change** that passes the test. Resist
+   adding behavior no test asks for. Rerun the single test, then the related tests.
+5. **Repeat** red and green for each remaining case, one at a time.
+6. **Refactor** names, duplication, and structure in both production and test
+   code, rerunning the tests after each step. Behavior and assertions stay
+   unchanged during refactoring.
+7. **Run the full suite**, plus lint and type-check, as separate commands.
 
-If no raw JSON payload is provided, apply these defaults and strict TDD rules:
+## Running a single test
 
-- **Red State Verification Rule**: Always run the newly written test BEFORE implementing production code to verify that it fails for the expected reason (prevents false-positive tests that pass vacuously).
-- **Minimal Code Principle**: Write the simplest possible production code to turn the failing test green; avoid pre-emptive refactoring or un-tested feature logic during the Red-Green loop.
-- **Behavior over Implementation Details**: Test public API contracts and user-visible behaviors, not private internal helper implementations.
-
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Observable Behavior Definition & Seam Identification
-
-1. Read requirement, issue report, and existing test patterns.
-2. Define the observable behavior contract (input $\rightarrow$ expected output / error).
-3. Identify test seam: locate existing test files or create `tests/unit/<component>.test.ts`.
-
-### Step 2: Red Phase — Author & Verify Failing Test
-
-1. Write a focused test describing the desired behavior:
-   ```typescript
-   it('should reject passwords missing special characters', () => {
-     const result = validatePassword('Password123');
-     expect(result.isValid).toBe(false);
-     expect(result.error).toContain('special character');
-   });
-   ```
-2. Execute the test command and verify **Expected Red Failure**:
-   ```bash
-   pnpm test -- filter=validatePassword
-   ```
-3. Confirm error message matches expected failure mode.
-
-### Step 3: Green Phase — Minimal Production Code Implementation
-
-1. Write the minimal production code necessary to pass the test:
-   - Do NOT add extraneous features or un-tested helper methods.
-2. Re-run focused test and verify **Green Pass**:
-   ```bash
-   pnpm test -- filter=validatePassword
-   ```
-
-### Step 4: Refactor Phase — Clean Code Optimization
-
-1. Clean up production and test code (rename variables, extract pure functions, remove duplication).
-2. Re-run test suite to ensure tests stay 100% green.
-
-### Step 5: Full Regression Suite Verification
-
-Execute full test suite to guarantee zero regressions across adjacent modules:
-```bash
-pnpm test || pytest || cargo test
-```
-
----
-
-## 3. Reference Implementation: Python TDD Red-Green Loop Harness
-
-```python
-import subprocess
-import sys
-from typing import Tuple
-
-class TddRunner:
-    """TDD Red-Green-Refactor Execution Loop Harness."""
-    
-    def __init__(self, test_cmd: str):
-        self.test_cmd = test_cmd
-
-    def run_tests() -> Tuple[bool, str]:
-        try:
-            res = subprocess.run(self.test_cmd, shell=True, capture_output=True, text=True, timeout=60)
-            return res.returncode == 0, res.stdout + res.stderr
-        except subprocess.TimeoutExpired:
-            return False, "Test execution timed out."
-
-    def verify_red_phase(self) -> bool:
-        """Verify that the test suite fails as expected (Red Phase)."""
-        print("[TDD Red Phase] Running newly written test to verify failure...")
-        passed, log = self.run_tests()
-        if not passed:
-            print("[SUCCESS] Red phase confirmed: Test failed as expected.")
-            return True
-        else:
-            print("[ERROR] Red phase failed: Test passed unexpectedly! Check test validity.")
-            return False
-
-    def verify_green_phase(self) -> bool:
-        """Verify that the production code change makes tests pass (Green Phase)."""
-        print("[TDD Green Phase] Running tests after implementation...")
-        passed, log = self.run_tests()
-        if passed:
-            print("[SUCCESS] Green phase confirmed: Tests pass cleanly!")
-            return True
-        else:
-            print("[ERROR] Green phase failed: Tests are still failing.")
-            print(log[:800])
-            return False
-
-if __name__ == "__main__":
-    runner = TddRunner("python3 -m unittest tests/test_auth.py")
-    if len(sys.argv) > 1 and sys.argv[1] == "--red":
-        sys.exit(0 if runner.verify_red_phase() else 1)
-    elif len(sys.argv) > 1 and sys.argv[1] == "--green":
-        sys.exit(0 if runner.verify_green_phase() else 1)
-```
-
----
-
-## 4. TDD Invariants & State Transition Rules
-
-$$\text{Red State Invariant: } \text{TestOutcome}(T_{\text{new}}, \text{Code}_{\text{old}}) \equiv \mathbf{FAIL\_EXPECTED}$$
-
-$$\text{Green State Invariant: } \text{TestOutcome}(T_{\text{new}}, \text{Code}_{\text{new}}) \equiv \mathbf{PASS}$$
-
-$$\text{Refactor State Invariant: } \text{TestOutcome}(T_{\text{suite}}, \text{Code}_{\text{refactored}}) \equiv \mathbf{PASS}$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **No Unverified Green**: Never implement production code without writing and verifying the failing test first.
-- **Minimal Production Code**: Avoid writing pre-emptive features or un-tested helper methods during the Green phase.
-- **Public Contract Testing**: Focus tests on public interfaces and observable behavior, avoiding tight coupling to private implementation details.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If an implementation approach fails to turn tests green or creates unsolvable architectural friction:
+Use the project's runner. Common forms:
 
 ```bash
-# Revert production code edits while preserving the test file
-git checkout -- src/ 2>/dev/null
+npx vitest run path/to/file.test.ts -t "rejects passwords without a symbol"
+npx jest path/to/file.test.ts -t "rejects passwords without a symbol"
+python -m pytest tests/test_auth.py::test_rejects_password_without_symbol -q
+go test ./auth -run '^TestRejectsPasswordWithoutSymbol$'
+cargo test rejects_password_without_symbol
 ```
 
----
+If the project wraps its runner in a package script, pass arguments through
+(for example `npm test -- path/to/file.test.ts -t "..."`), and check how the
+script forwards them.
 
-## 7. Verification Plan & Toolchain Commands
+## Example
 
-Execute TDD loop commands:
-
-```bash
-# 1. Verify Red Phase (failing test)
-python3 scripts/tdd_runner.py --red
-
-# 2. Verify Green Phase (passing test)
-python3 scripts/tdd_runner.py --green
-
-# 3. Run full regression test suite
-pnpm test || pytest || cargo test
+```typescript
+// Red: this fails until validatePassword enforces the rule.
+it('rejects passwords without a symbol', () => {
+  const result = validatePassword('Password123');
+  expect(result.ok).toBe(false);
+  expect(result.reason).toBe('missing_symbol');
+});
 ```
 
----
+The first run should fail on the assertion (`expected true to be false`). Failing
+with `validatePassword is not defined` means the test is not yet testing the rule.
 
-## 8. Completion Report
+## Guardrails
 
-Report observable behavior specified, test file created/updated, Red phase failure output verified, Green phase implementation summary, refactoring steps executed, full regression suite results, and final code coverage metrics.
+- Never weaken, skip, or delete an assertion to get to green.
+- Undo only your own edits when an approach fails; do not discard other
+  uncommitted work in the tree.
+- Keep refactoring separate from behavior changes; if a refactor needs a behavior
+  change, go back to red.
+- Tests must be deterministic: no real network, clock, or random values without
+  the project's fakes or seeds.
+
+## Verification
+
+- The new tests failed before the change (keep the failing output) and pass after.
+- The full suite, lint, and type-check pass, each run separately.
+- The diff contains no unrelated changes.
+
+## Report
+
+- Behavior specified, with the test names.
+- Red output (the key failing line) and green result.
+- Production changes, by file.
+- Full suite, lint, and type-check results.
+- Cases deliberately not covered, and why.
+
+## Optional delegation
+
+The `test-writer` subagent can write the failing tests while you study the
+production code; review that each test fails for the stated reason before
+implementing.

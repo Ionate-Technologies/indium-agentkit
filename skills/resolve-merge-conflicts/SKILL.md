@@ -1,227 +1,106 @@
 ---
 name: resolve-merge-conflicts
-description: Resolve Git merge or rebase conflicts by recovering each side's intent, preserving compatible behavior, validating the result, and documenting trade-offs.
+description: "Resolve Git merge, rebase, or cherry-pick conflicts by recovering what each side intended, combining compatible changes, regenerating lockfiles and generated files properly, and proving the result builds and passes tests. Use when a merge, rebase, or cherry-pick stops with conflicts. Not for reviewing the merged result for defects (use the review-change skill)."
 ---
 
 # Resolve Merge Conflicts
 
-Identify, inspect, and resolve Git merge, rebase, and cherry-pick conflicts across source code files, configuration manifests, build scripts, and package lockfiles by recovering the intent of both branches (`ours` and `theirs`) and verifying the integrated resolution against automated test suites.
+Produce a resolution that keeps the intent of both sides, not just text that
+compiles. Understand each change before choosing between them.
 
-The skill is **contract-first and intent-preserving**: conflict marker discovery (`<<<<<<< HEAD`), three-way diff inspection (`:1:base`, `:2:ours`, `:3:theirs`), zero un-resolved conflict markers ($\text{Count}(\text{"<<<<<<<"}) = 0$), lockfile regeneration, and test suite verification are strictly enforced before completing commits.
+## When to use
 
----
+- `git merge`, `git rebase`, `git cherry-pick`, or `git stash pop` reports conflicts.
+- The user asks to bring a branch up to date with the default branch.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Reviewing the merged code for bugs: use the `review-change` skill.
+- Deciding whether to merge or rebase is a team policy question; follow
+  `AGENTS.md` or ask.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Resolve the merge conflicts in `src/auth.ts` and `package.json` between main and feature/oauth while keeping both changes working"*), the agent **must automatically infer and populate** `conflict_type`, `conflicting_files`, `ours_branch`, `theirs_branch`, and `resolution_strategy` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+- The operation in progress: `git status` shows "You have unmerged paths" plus
+  "merging", "rebasing", or "cherry-picking".
+- The unmerged files: `git diff --name-only --diff-filter=U` or `git ls-files -u`.
+- The intent of each side: commit messages, linked issues, and pull request
+  descriptions.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ResolveMergeConflictsContextManifest",
-  "type": "object",
-  "required": ["conflict_spec", "resolution_config"],
-  "properties": {
-    "conflict_spec": {
-      "type": "object",
-      "required": ["conflict_type", "conflicting_files"],
-      "properties": {
-        "conflict_type": { 
-          "type": "string", 
-          "enum": ["merge_conflict", "rebase_conflict", "cherry_pick_conflict"],
-          "default": "merge_conflict" 
-        },
-        "conflicting_files": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "ours_branch": { "type": "string", "default": "main" },
-        "theirs_branch": { "type": "string" }
-      }
-    },
-    "resolution_config": {
-      "type": "object",
-      "required": ["resolution_strategy"],
-      "properties": {
-        "resolution_strategy": { 
-          "type": "string", 
-          "enum": ["combine_intents", "favor_ours", "favor_theirs", "manual_rearchitect"],
-          "default": "combine_intents" 
-        },
-        "run_test_suite_post_resolution": { "type": "boolean", "default": true },
-        "regenerate_lockfiles": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
-```
+## Which side is "ours"
 
-### Automatic Natural Language Inference & Conflict Safety Rules
+The labels flip between operations, and getting them backwards silently discards
+work:
 
-If no raw JSON payload is provided, apply these defaults and strict conflict safety rules:
+- **Merge** (`git merge feature` while on `main`): ours is `main` (HEAD), theirs is
+  `feature`.
+- **Rebase** (`git rebase main` while on `feature`): Git replays your commits on
+  top of `main`, so **ours is `main`** (the base being rebuilt on) and **theirs is
+  your commit** being replayed.
+- **Cherry-pick**: ours is your current branch, theirs is the picked commit.
 
-- **Zero Unresolved Markers**: NEVER commit files containing un-resolved git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`).
-- **No Unrelated Code Edits**: Do NOT add unrelated feature changes or formatting refactorings while resolving merge conflicts.
-- **Lockfile Rule**: For lockfiles (`pnpm-lock.yaml`, `package-lock.json`), prefer regenerating via the package manager over manual line-by-line conflict editing.
+When in doubt, read the conflict marker labels and `git log -1 --format=%s MERGE_HEAD`
+(merge) or `REBASE_HEAD` (rebase) to see which commit is incoming.
 
----
+## Workflow
 
-## 2. Deterministic State Machine Execution Flow
+1. **Inspect each conflict with its base.** Show three versions:
+   `git show :1:path` (common ancestor), `:2:path` (ours), `:3:path` (theirs).
+   For a fuller picture, `git log --merge -p -- path` lists the commits on both
+   sides that touched the file. Before you edit a file, you can re-render its
+   markers with the base section included: `git checkout --conflict=zdiff3 -- path`
+   (Git 2.35 or later; use `diff3` on older versions). This rewrites the file, so
+   never run it after you have started resolving that file.
+2. **State each side's intent** in a sentence ("ours renamed `getUser` to
+   `fetchUser`; theirs added a `tenantId` parameter to `getUser`"). The correct
+   resolution usually applies both: the renamed function with the new parameter.
+3. **Resolve by kind:**
+   - **Code:** combine the intents; update every call site affected by either
+     side, including ones outside the conflict hunks.
+   - **Imports and lists:** keep both entries, deduplicate, keep ordering rules.
+   - **Lockfiles** (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+     `poetry.lock`, `Cargo.lock`): do not hand-merge. Resolve the manifest
+     (`package.json`, `pyproject.toml`, `Cargo.toml`) first, take one side's
+     lockfile (`git checkout --theirs -- <lockfile>` or `--ours`), then run the
+     package manager's install or lock command so it re-resolves for the merged
+     manifest.
+   - **Generated files** (clients, snapshots, catalogs): resolve their sources,
+     then regenerate with the project's command.
+   - **Deleted versus modified:** decide whether the modification still matters
+     after the deletion (move it to where the code now lives) or is obsolete.
+4. **Remove every marker** and mark files resolved with `git add <path>`.
+   Check with `git diff --check` (reports leftover conflict markers) and
+   `git diff --name-only --diff-filter=U` (should print nothing).
+5. **Check for semantic conflicts.** Code can merge cleanly and still break: one
+   side renames a function while the other adds a new caller of the old name.
+   Build, type-check, and run the tests before continuing.
+6. **Continue the operation:** `git merge --continue`, `git rebase --continue`, or
+   `git cherry-pick --continue`. During a rebase, repeat for each conflicting commit.
 
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
+For conflicts that recur across a long rebase, `git rerere` can record and reuse
+resolutions; enable it only if the user agrees (`git config rerere.enabled true`).
 
-### Step 1: Conflict Discovery & State Inspection
+## Guardrails
 
-1. Check current git status:
-   ```bash
-   git status --short
-   git diff --name-only --diff-filter=U
-   ```
-2. Identify unmerged paths (`diff-filter=U`).
+- Never pick a whole side (`--ours` or `--theirs` for a source file) without
+  understanding what the other side changed.
+- Do not add unrelated fixes or formatting changes while resolving.
+- Ask before aborting (`git merge --abort`, `git rebase --abort`): it discards the
+  resolutions done so far. Never force-push a rewritten shared branch without
+  explicit approval.
+- If a conflict depends on a product decision (two incompatible behaviors), stop
+  and ask rather than choosing silently.
 
-### Step 2: Three-Way Intent Recovery
+## Verification
 
-For each conflicting file, inspect the 3-way stage objects:
-- **Base Version (`:1:<file>`)**: The common ancestor commit before branching.
-- **Ours / Current (`:2:<file>`)**: Local branch changes (`HEAD`).
-- **Theirs / Incoming (`:3:<file>`)**: Incoming branch changes.
+Run separately: `git diff --check`; the unmerged-files check above; the project's
+build or type-check; and the test suites covering the conflicted files, then the
+full suite.
 
-Inspect commit logs for both sides (`git log --merge -p <file>`) to understand the exact motivation behind each change.
+## Report
 
-### Step 3: Conflict Marker Resolution
-
-1. Open conflicting file and locate markers (`<<<<<<< HEAD` ... `=======` ... `>>>>>>>`).
-2. Resolve conflict by combining compatible logic:
-   - Keep both non-conflicting imports.
-   - Combine feature additions.
-   - Resolve parameter order conflicts.
-3. Remove all conflict marker lines completely.
-
-### Step 4: Lockfile & Generated File Handling
-
-If lockfiles conflict (`pnpm-lock.yaml`, `package-lock.json`, `Cargo.lock`):
-1. Checkout `ours` version or accept current state.
-2. Run package manager install command to regenerate lockfile cleanly (`pnpm install`, `npm install`, `cargo check`).
-
-### Step 5: Verification & Merge Finalization
-
-1. Search repository for any missed conflict markers:
-   ```bash
-   git grep -E "^<<<<<<< "
-   ```
-2. Run test suite to verify integration success (`pnpm test`, `pytest`, `cargo test`).
-3. Stage resolved files and complete merge/rebase:
-   ```bash
-   git add <resolved_files>
-   git merge --continue  # or git rebase --continue
-   ```
-
----
-
-## 3. Reference Implementation: Python Git Conflict Inspector
-
-```python
-import subprocess
-import sys
-from pathlib import Path
-from typing import List
-
-def get_conflicting_files() -> List[str]:
-    """Get list of unmerged conflicting files in git repository."""
-    try:
-        res = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U"],
-            capture_output=True, text=True, check=True
-        )
-        return [f.strip() for f in res.stdout.splitlines() if f.strip()]
-    except subprocess.CalledProcessError:
-        return []
-
-def check_unresolved_markers(files: List[str]) -> List[str]:
-    """Check if any files still contain un-resolved conflict markers."""
-    flagged_files = []
-    markers = ["<<<<<<< ", "=======", ">>>>>>> "]
-    
-    for filePath in files:
-        p = Path(filePath)
-        if not p.exists():
-            continue
-        content = p.read_text(encoding="utf-8", errors="ignore")
-        for m in markers:
-            if m in content:
-                flagged_files.append(filePath)
-                break
-                
-    return flagged_files
-
-if __name__ == "__main__":
-    conflicts = get_conflicting_files()
-    if not conflicts:
-        print("[Git Conflict Inspector] No active merge conflicts detected.")
-    else:
-        print(f"[Git Conflict Inspector] Found {len(conflicts)} conflicting files:")
-        for c in conflicts:
-            print(f" - {c}")
-            
-        unresolved = check_unresolved_markers(conflicts)
-        if unresolved:
-            print(f"\n[WARNING] {len(unresolved)} files still contain unresolved conflict markers!")
-        else:
-            print("\n[SUCCESS] All conflict markers have been removed cleanly.")
-```
-
----
-
-## 4. Conflict Resolution Invariants
-
-$$\text{Marker Invariant: } \text{Count}(\text{"<<<<<<< "}) \equiv 0 \quad (\text{across all tracked files})$$
-
-$$\text{Intent Equivalence: } \text{Preserved}(\text{Ours}) \land \text{Preserved}(\text{Theirs}) \equiv \mathbf{TRUE}$$
-
-$$\text{Lockfile Consistency: } \text{LockfileStatus} \equiv \text{RegeneratedByPackageManager}$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Zero Leftover Markers**: Never commit code containing git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`).
-- **No Scope Creep**: Do not add unrelated code fixes or formatting refactoring while resolving merge conflicts.
-- **Regenerate Lockfiles**: Never attempt manual line-by-line editing of 10,000-line lockfiles; use `pnpm install` / `npm install` to regenerate cleanly.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If merge resolution encounters un-resolvable conflicts or severe breakage:
-
-```bash
-# Abort current merge or rebase cleanly
-git merge --abort 2>/dev/null || git rebase --abort 2>/dev/null
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Verify conflict resolution:
-
-```bash
-# 1. Check for leftover conflict markers across entire repository
-git grep -E "^<<<<<<< "
-
-# 2. Run Python Git Conflict Inspector
-python3 scripts/check_git_conflicts.py
-
-# 3. Run full test suite to verify integrated behavior
-pnpm test || pytest || cargo test
-```
-
----
-
-## 8. Completion Report
-
-Report conflict type (`merge`, `rebase`), list of conflicting files resolved, intent recovery summary for both sides, lockfiles regenerated, conflict marker check results, test suite verification results, and merge completion status.
+- Operation and branches involved, with which side was ours and theirs.
+- Each conflicted file: both intents and how they were combined.
+- Lockfiles and generated files regenerated, with the commands used.
+- Build and test results.
+- Decisions that need the user's confirmation.

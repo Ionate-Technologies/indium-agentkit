@@ -1,239 +1,101 @@
 ---
 name: estimate-work
-description: Decompose technical tasks into scope, story points, PERT effort estimations, risk multipliers, and delivery sequences.
+description: "Estimate the scope, effort, and risk of a technical task by inspecting the affected code, slicing the work, giving three-point ranges per slice, and combining them into an honest range with stated assumptions. Use when someone asks how big, how long, or how risky a change is. Not for producing the implementation plan itself (use the plan-change skill)."
 ---
 
 # Estimate Work
 
-Produce empirical, evidence-backed scope assessments, Work Breakdown Structures (WBS), PERT three-point effort estimations ($E = \frac{O + 4M + P}{6}$), risk multipliers, and critical path dependency sequences for technical features, refactorings, and migrations.
+Give an estimate that is grounded in the code and honest about uncertainty: a
+range with a confidence level and the assumptions behind it, never a single
+precise number presented as fact.
 
-The skill is **evidence-backed and mathematically bounded**: codebase file inspection, dependency graphs, API contract breaking changes, data migration complexities, PERT standard deviations ($\sigma = \frac{P - O}{6}$), and explicit assumptions are verified before publishing effort metrics.
+## When to use
 
----
+- "How long will this take?", "Is this a small or large change?", "What are the
+  risks in migrating X?"
+- Sizing work for a roadmap, a sprint, or a go or no-go decision.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- A step-by-step implementation plan is needed: use the `plan-change` skill (an
+  estimate can be part of it).
+- The uncertainty is too large to estimate: run the `prototype-spike` skill first.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Estimate the effort and risk to migrate our auth database from MySQL to PostgreSQL with zero downtime"*), the agent **must automatically infer and populate** `target_feature_or_issue`, `estimation_model`, `complexity_factors`, and `risk_tolerance` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+- The request, its scope, and what "done" means (tested, deployed, documented).
+- **Who does the work:** an agent in this session, or a human team. Agent effort,
+  human effort, and calendar time differ; say which one you estimate.
+- The affected code, found by searching: modules, interfaces, schemas, tests,
+  and their current coverage.
+- **Reference history** where available: similar past changes in this repository
+  (`git log --stat` on the affected paths, merged pull requests that touched them,
+  and how large and how long they were).
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "EstimateWorkContextManifest",
-  "type": "object",
-  "required": ["estimation_target", "estimation_config"],
-  "properties": {
-    "estimation_target": {
-      "type": "object",
-      "required": ["target_feature_or_issue"],
-      "properties": {
-        "target_feature_or_issue": { "type": "string" },
-        "affected_modules": { "type": "array", "items": { "type": "string" } },
-        "target_sprint_weeks": { "type": "integer", "default": 2 }
-      }
-    },
-    "estimation_config": {
-      "type": "object",
-      "required": ["estimation_model"],
-      "properties": {
-        "estimation_model": { 
-          "type": "string", 
-          "enum": ["pert_three_point", "tshirt_sizing", "fibonacci_story_points"],
-          "default": "pert_three_point" 
-        },
-        "confidence_level_pct": { "type": "integer", "default": 95 },
-        "include_risk_buffer": { "type": "boolean", "default": true }
-      }
-    },
-    "complexity_factors": {
-      "type": "object",
-      "properties": {
-        "touches_database_schema": { "type": "boolean", "default": false },
-        "touches_external_apis": { "type": "boolean", "default": false },
-        "requires_data_migration": { "type": "boolean", "default": false },
-        "test_coverage_gap": { "type": "boolean", "default": false }
-      }
-    }
-  }
-}
-```
+## Workflow
 
-### Automatic Natural Language Inference & Evidence Rules
+1. **Inspect the impact.** Find the entry points, callers, data model, and tests
+   affected. Note unfamiliar or untested areas; they drive risk.
+2. **Slice the work** into pieces that can be delivered and verified separately,
+   for example: schema and data migration, core logic, interfaces or API, UI, rollout
+   and documentation. Skip slices that do not apply.
+3. **Estimate each slice with three points**: optimistic O (things go right),
+   most likely M, pessimistic P (realistic bad case, not catastrophe). Anchor the
+   numbers to the reference history where you have it.
+4. **Adjust for known risks per slice** by revising O, M, and P directly (for
+   example a live data migration or an untested legacy module widens P). Name the
+   reason for every adjustment rather than applying a generic multiplier.
+5. **Combine** (formulas below) into a total range and a confidence statement.
+6. **Check the spread.** If a significant slice has P more than about three times
+   M, the uncertainty is too high for a useful estimate; recommend a spike for that
+   slice and estimate the rest.
+7. **Identify the critical path and dependencies** on other people, reviews,
+   environments, or approvals, which often dominate calendar time.
 
-If no raw JSON payload is provided, apply these defaults and strict estimation rules:
+## Combining three-point estimates
 
-- **No Ungrounded Guesses**: Never output precise numeric hours without inspecting affected code, existing tests, and architecture references.
-- **`estimation_model`**: Defaults to `pert_three_point` for rigorous statistical effort estimation.
-- **Explicit Assumptions Required**: Every estimate report MUST list explicit assumptions (e.g., "Assumes schema changes are backward-compatible").
+For each slice, the PERT approximation gives:
 
----
+- mean = (O + 4M + P) / 6
+- standard deviation = (P − O) / 6
 
-## 2. Deterministic State Machine Execution Flow
+For the total, add the means. If the slices are roughly independent, the total
+standard deviation is the square root of the sum of the slice variances (each
+variance is the standard deviation squared). Correlated risks (one shared unknown
+affecting several slices) make the true spread wider than this; say so when it
+applies.
 
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
+Report a one-sided upper bound: about 84% confidence at mean + 1 × sd, 90% at
+mean + 1.28 × sd, 95% at mean + 1.645 × sd. These rely on a normal approximation
+that is rough for small numbers of slices, so round the results and present them
+as a range.
 
-### Step 1: Codebase Impact & Dependency Discovery
+Example with two slices, in hours: schema migration O=4, M=8, P=20 gives mean 9.3
+and sd 2.7; API changes O=3, M=6, P=12 gives mean 6.5 and sd 1.5. Total mean 15.8,
+total sd √(2.7² + 1.5²) ≈ 3.1, 90% upper bound ≈ 15.8 + 1.28 × 3.1 ≈ 19.8. Report
+"about 16 hours, likely under 20, assuming the backfill fits in batches".
 
-1. Inspect affected files, API endpoints, schema definitions, and unit test suites (`Grep`, `Glob`, `Read`).
-2. Map integration boundaries: database migrations, external HTTP clients, cache invalidations, and UI component cascades.
+## Guardrails
 
-### Step 2: Work Breakdown Structure (WBS) Slicing
+- Do not output numbers without inspecting the affected code first.
+- Never present an estimate as a commitment; it is planning information.
+- Make every assumption explicit; an estimate without assumptions cannot be checked.
 
-1. Decompose the request into independently deliverable, testable slices:
-   - **Slice 1 (Schema & Model)**: Database DDLs, migrations, entity definitions.
-   - **Slice 2 (Core Business Logic)**: Service layer, domain rules, unit tests.
-   - **Slice 3 (API & Controller)**: HTTP handlers, input validation, integration tests.
-   - **Slice 4 (UI / Client)**: Component state, forms, accessibility, end-to-end tests.
+## Verification
 
-### Step 3: PERT Three-Point Estimation & Standard Deviation
+Re-read the slices against the request: every requirement maps to a slice, and
+every slice maps to code you inspected. Confirm the arithmetic.
 
-For each slice, estimate three values in Person-Hours or Story Points:
-- **Optimistic ($O$)**: Everything goes perfectly with zero integration blockers.
-- **Most Likely ($M$)**: Normal expected complexity under standard conditions.
-- **Pessimistic ($P$)**: Worst-case scenario encountering maximum risks and refactorings.
+## Report
 
-Calculate Expected Effort ($E$) and Standard Deviation ($\sigma$):
+- **Estimate:** the range, its confidence, and the unit (agent effort, human effort,
+  or calendar time).
+- **Slices:** a table with O, M, P, mean, and the main risk for each.
+- **Assumptions and unknowns:** each with its effect on the range.
+- **Critical path and external dependencies.**
+- **Recommendation:** proceed, spike first (and on what), or split the work.
 
-$$E = \frac{O + 4M + P}{6}$$
+## Optional delegation
 
-$$\sigma = \frac{P - O}{6}$$
-
-### Step 4: Risk Multipliers & Critical Path Scheduling
-
-1. Apply risk multipliers based on codebase health:
-   - Missing unit test coverage: $+25\%$ buffer.
-   - Live data migration required: $+35\%$ buffer.
-   - Third-party API dependency: $+20\%$ buffer.
-2. Identify the Critical Path (longest sequence of dependent tasks).
-
----
-
-## 3. Reference Implementation: Python PERT & WBS Estimator
-
-```python
-import math
-from typing import List, Dict, Any
-
-class WorkEstimator:
-    """PERT Three-Point Estimation and Risk Multiplier Calculator."""
-    
-    def __init__(self, confidence_level: str = "95%"):
-        self.confidence_level = confidence_level
-        # Z-score for 95% confidence interval is 1.96
-        self.z_score = 1.96 if confidence_level == "95%" else 1.645
-
-    def calculate_slice(self, name: str, o: float, m: float, p: float, risk_factors: List[str]) -> Dict[str, Any]:
-        expected = (o + 4 * m + p) / 6.0
-        std_dev = (p - o) / 6.0
-        variance = std_dev ** 2
-        
-        # Apply risk factor multipliers
-        multiplier = 1.0
-        if "data_migration" in risk_factors:
-            multiplier += 0.35
-        if "no_test_coverage" in risk_factors:
-            multiplier += 0.25
-        if "third_party_api" in risk_factors:
-            multiplier += 0.20
-            
-        risk_adjusted_expected = expected * multiplier
-        
-        return {
-            "slice_name": name,
-            "optimistic": o,
-            "most_likely": m,
-            "pessimistic": p,
-            "expected_effort": round(expected, 2),
-            "std_deviation": round(std_dev, 2),
-            "variance": round(variance, 2),
-            "risk_multiplier": multiplier,
-            "risk_adjusted_effort": round(risk_adjusted_expected, 2)
-        }
-
-    def Total_project_estimate(self, slices: List[Dict[str, Any]]) -> Dict[str, Any]:
-        total_expected = sum(s["risk_adjusted_effort"] for s in slices)
-        total_variance = sum(s["variance"] for s in slices)
-        combined_std_dev = math.sqrt(total_variance)
-        
-        upper_bound_95 = total_expected + (self.z_score * combined_std_dev)
-        
-        return {
-            "total_expected_hours": round(total_expected, 2),
-            "combined_std_dev": round(combined_std_dev, 2),
-            "upper_bound_95_pct_confidence": round(upper_bound_95, 2),
-            "total_slices": len(slices)
-        }
-
-if __name__ == "__main__":
-    estimator = WorkEstimator()
-    s1 = estimator.calculate_slice("DB Schema & Migration", o=4, m=8, p=16, risk_factors=["data_migration"])
-    s2 = estimator.calculate_slice("Auth API Handlers", o=3, m=6, p=12, risk_factors=["no_test_coverage"])
-    
-    summary = estimator.Total_project_estimate([s1, s2])
-    print(f"Total Expected Effort: {summary['total_expected_hours']} hrs (95% CI Upper Bound: {summary['upper_bound_95_pct_confidence']} hrs)")
-```
-
----
-
-## 4. Mathematical Formulas & Statistical Invariants
-
-### 1. PERT Expected Value ($E$)
-
-$$E = \frac{O + 4M + P}{6}$$
-
-### 2. PERT Standard Deviation ($\sigma$) & Variance ($\sigma^2$)
-
-$$\sigma = \frac{P - O}{6}, \quad \sigma^2 = \left( \frac{P - O}{6} \right)^2$$
-
-### 3. Total Project Standard Deviation ($\sigma_{\text{total}}$)
-
-$$\sigma_{\text{total}} = \sqrt{\sum_{i=1}^{N} \sigma_i^2}$$
-
-### 4. Confidence Interval Upper Bound ($CI_{95\%}$)
-
-$$CI_{95\%} = E_{\text{total}} + 1.96 \cdot \sigma_{\text{total}}$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Advisory Only**: Estimates are planning indicators, not binding contract commitments.
-- **Mandatory Risk Buffer**: Always state explicit risk multipliers when touching unfamiliar code or live databases.
-- **Explicit Assumptions**: Every estimate report MUST include a dedicated "Assumptions & Unknowns" section.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If code exploration reveals hidden architectural complexity during estimation:
-
-```bash
-# Clean up temporary estimation artifacts or scratch files
-rm -f scratch_estimate.json 2>/dev/null
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Verify code impact before finalizing estimates:
-
-```bash
-# 1. Inspect lines of code changed in similar past pull requests
-git log -S "auth" --stat -n 5
-
-# 2. Run static test coverage checks to determine risk buffer
-python3 -m unittest discover -s tests -v
-```
-
----
-
-## 8. Completion Report
-
-Report WBS task slices, PERT optimistic/most-likely/pessimistic inputs, expected efforts ($E$), standard deviations ($\sigma$), 95% confidence upper bounds, risk multipliers applied, critical path sequence, and explicit assumptions.
+The `estimator` subagent can produce an independent estimate from the same inputs;
+compare the two and explain any large difference.

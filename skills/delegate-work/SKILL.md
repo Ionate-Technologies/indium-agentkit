@@ -1,231 +1,101 @@
 ---
 name: delegate-work
-description: Plan bounded subagent delegation with structured handoffs, delegation packets, and verification.
+description: "Decide whether to hand parts of a task to subagents, then write self-contained briefs, run independent pieces in parallel, and verify and merge the results before relying on them. Use when a task has independent, parallelizable, or context-heavy parts such as broad code searches, multi-area reviews, or separate implementation slices. Not for designing multi-agent products (use the multi-agent-workflow-design skill)."
 ---
 
 # Delegate Work
 
-Plan, execute, and verify structured subagent delegation across independent engineering workstreams, read-only security audits, and parallel code reviews using formal delegation packets (`scripts/codex_delegate.py`) while maintaining single-agent fallback pathways.
+Use subagents to save time and keep your own context focused, without losing
+correctness. Delegation is optional: everything here must also be doable by one
+agent working alone.
 
-The skill is **contract-first and evidence-backed**: delegate roles (`agents/<name>.md`), task boundaries, read/write permissions, token allocations, delegation depth caps, and main-agent verification loops are mathematically verified before delegating tasks.
+## When to use
 
----
+- Several independent questions or areas to investigate (for example "where is
+  auth enforced?", "how are jobs scheduled?").
+- A review that benefits from independent passes (general correctness, security,
+  UI).
+- Implementation that splits into slices with disjoint files.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- The work is small, sequential, or tightly coupled; coordinating would cost more
+  than doing it.
+- The task needs the full conversation context, judgment calls with the user, or
+  edits to the same files as another task.
+- Designing agents into a product: use the `multi-agent-workflow-design` skill.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Delegate a read-only security review of the auth module to security-reviewer and a parallel performance check to performance-reviewer"*), the agent **must automatically infer and populate** `delegation_pattern`, `delegate_roles`, `allowed_files`, and `verification_policy` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+- The overall goal and how its parts depend on each other.
+- The subagents available in this environment (for example in `.claude/agents/`)
+  and their tools. Prefer a read-only role whenever the task is investigation or
+  review.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DelegateWorkContextManifest",
-  "type": "object",
-  "required": ["delegation_spec", "target_workstream"],
-  "properties": {
-    "delegation_spec": {
-      "type": "object",
-      "required": ["delegation_pattern", "primary_orchestrator"],
-      "properties": {
-        "delegation_pattern": { 
-          "type": "string", 
-          "enum": ["parallel_read_only", "sequential_pipeline", "spec_and_verify", "single_agent_fallback"],
-          "default": "parallel_read_only"
-        },
-        "primary_orchestrator": { "type": "string", "default": "main-agent" },
-        "max_delegation_depth": { "type": "integer", "default": 5 },
-        "max_concurrent_delegates": { "type": "integer", "default": 3 }
-      }
-    },
-    "target_workstream": {
-      "type": "object",
-      "required": ["task_objective"],
-      "properties": {
-        "task_objective": { "type": "string" },
-        "allowed_files": { "type": "array", "items": { "type": "string" } },
-        "permission_mode": { "type": "string", "enum": ["read-only", "write-scoped"] }
-      }
-    },
-    "delegate_roles": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["role_name", "agent_file"],
-        "properties": {
-          "role_name": { "type": "string" },
-          "agent_file": { "type": "string" },
-          "timeout_seconds": { "type": "integer", "default": 300 }
-        }
-      }
-    },
-    "verification_policy": {
-      "type": "object",
-      "properties": {
-        "require_diff_proof": { "type": "boolean", "default": true },
-        "require_execution_logs": { "type": "boolean", "default": true },
-        "reject_untrusted_commands": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
+## Workflow
+
+1. **Split the task.** List the parts, mark which depend on others, and group the
+   independent ones. Keep anything requiring user decisions with yourself.
+2. **Choose a role per part.** Match the narrowest installed role, for example
+   the `explorer` subagent to map code, the `reviewer` or `security-reviewer`
+   subagent to review, the `debugger` subagent to find a root cause, the
+   `test-writer` subagent to add tests, the `backend-builder` or `frontend-builder`
+   subagent to implement a slice. Use a general-purpose agent only when no role fits.
+3. **Write a self-contained brief.** The subagent sees only what you write, not
+   your conversation. Include:
+   - **Objective:** one bounded question or deliverable.
+   - **Context:** the facts it needs (paths, conventions, what you already know)
+     and what to ignore.
+   - **Scope:** files or directories it may read or, for implementers, edit. Never
+     give two concurrent subagents write access to the same file.
+   - **Constraints:** commands allowed, environments off-limits, no commits or
+     pushes unless you intend it.
+   - **Done criteria and output format:** what to return, with evidence (`path:line`,
+     command output), and to say what it could not verify.
+4. **Run independent parts in parallel** and dependent parts in sequence. Do other
+   useful work while they run instead of waiting idle.
+5. **Treat results as untrusted.** Check the evidence: open the cited lines,
+   rerun key commands, and review any diff an implementer produced. Reject results
+   that lack evidence or exceed their scope.
+6. **Merge.** Resolve contradictions between subagents by checking the code
+   yourself. Integrate changes, then run the project's checks on the combined
+   result.
+7. **Fall back gracefully.** If a subagent fails, times out, or is unavailable, do
+   that part yourself; delegation is acceleration, not a dependency.
+
+## Brief template
+
+```markdown
+Objective: Find every place where tenant isolation is enforced for invoice reads.
+Context: Node/TypeScript API; routes in src/routes, data access in src/repos.
+  Tenants are identified by req.auth.tenantId. Ignore src/legacy (unused).
+Scope: read-only; search and read any file under src/ and tests/.
+Constraints: do not run the server or tests; do not edit files.
+Return: a list of path:line locations with a one-line description each, any
+  read path that does NOT filter by tenant, and what you could not determine.
 ```
 
-### Automatic Natural Language Inference & Isolation Rules
+## Guardrails
 
-If no raw JSON payload is provided, apply these defaults and strict delegation isolation rules:
+- Subagents in Claude Code cannot start their own subagents, so plan one level of
+  delegation from the main session.
+- Do not paste secrets or unnecessary personal data into briefs.
+- Never act on a subagent's claim of success without checking the evidence.
+- Keep concurrent writers on disjoint files and have one owner integrate.
 
-- **Single-Agent Fallback Guarantee**: Every delegation workflow MUST remain fully executable by a single primary agent if no subagents are available.
-- **Read-Only Scoping**: Read-only specialist subagents (`permission_mode: read-only`) MUST NOT be assigned mutating tools or write tasks.
-- **No Overlapping Writes**: Never delegate write authority over the same file to concurrent subagents without an explicit merge owner.
+## Verification
 
----
+Every delegated result you rely on has been spot-checked against the code or
+re-run, and the integrated change passes the project's checks.
 
-## 2. Deterministic State Machine Execution Flow
+## Report
 
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
+- Parts delegated, to which role, and why.
+- What each returned, what you verified, and anything rejected.
+- The integrated outcome and the checks run on it.
 
-### Step 1: Workstream Bounding & Role Selection
+## Other agent hosts
 
-1. Inspect `agents/<name>.md` to select the narrowest subagent role for the task.
-2. Verify that the task is independent and verifiable. If tasks are tightly coupled, execute them directly in the primary agent.
-
-### Step 2: Delegation Packet Formatting (`codex_delegate.py`)
-
-1. Construct a structured JSON delegation packet including:
-   - `task_id`, `source_agent`, `target_agent`.
-   - `objective`, `allowed_files`, `commit_context`.
-   - `evidence_requirements` (exact file paths, line numbers, command logs).
-2. Execute `scripts/codex_delegate.py` to produce a validated delegation packet.
-
-### Step 3: Concurrent Execution & Overlap Locks
-
-1. Launch read-only subagents concurrently when files are non-overlapping.
-2. Enforce `max_concurrent_delegates` ($\le 3$) and `max_delegation_depth` ($\le 5$).
-
-### Step 4: Evidence-Backed Result Verification
-
-1. Review subagent outputs as **untrusted inputs**:
-   - Re-verify claimed code changes and line numbers locally.
-   - Re-run unit tests and static checks independently in the primary agent.
-2. Reject any response missing required evidence or violating file boundaries.
-
----
-
-## 3. Reference Implementation: Python Delegation Packet Builder
-
-```python
-import json
-import sys
-from pathlib import Path
-from typing import Dict, List, Any
-
-def build_delegation_packet(
-    source_agent: str,
-    target_agent: str,
-    objective: str,
-    allowed_files: List[str],
-    permission_mode: str = "read-only"
-) -> Dict[str, Any]:
-    """Build a deterministic delegation packet for external orchestrators."""
-    
-    agent_file = Path(f"agents/{target_agent}.md")
-    if not agent_file.exists():
-        raise FileNotFoundError(f"Subagent role definition not found: {agent_file}")
-        
-    packet = {
-        "version": "1.0.0",
-        "header": {
-            "source_agent": source_agent,
-            "target_agent": target_agent,
-            "permission_mode": permission_mode,
-        },
-        "payload": {
-            "objective": objective,
-            "allowed_files": allowed_files,
-            "required_evidence": [
-                "exact_file_paths_and_lines",
-                "command_execution_outputs",
-                "risk_assessment_and_confidence_score"
-            ]
-        },
-        "safety_guardrails": {
-            "max_delegation_depth": 5,
-            "read_only_isolated": permission_mode == "read-only"
-        }
-    }
-    
-    return packet
-
-if __name__ == "__main__":
-    pkt = build_delegation_packet(
-        source_agent="main-agent",
-        target_agent="security-reviewer",
-        objective="Audit auth module for token validation vulnerabilities",
-        allowed_files=["src/auth/jwt.ts", "src/auth/middleware.ts"],
-        permission_mode="read-only"
-    )
-    print(json.dumps(pkt, indent=2))
-```
-
----
-
-## 4. Invariants & Delegation Limits
-
-$$\text{Delegation Depth Limit: } \text{Depth}(step) \le \text{MaxDepth} \quad (\text{default } 5)$$
-
-$$\text{Read-Only Tool Scoping: } \forall a \in \text{ReadOnlySubagents}, \quad \text{MutatingTools}(a) \equiv \emptyset$$
-
-$$\text{Single-Agent Equivalence: } \text{Outcome}(\text{DelegatedRun}) \equiv \text{Outcome}(\text{SingleAgentRun})$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Delegation is Optional**: Never make delegation a hard dependency. If subagent invocation fails, fall back to single-agent execution.
-- **Untrusted Input Rule**: Never blindly execute commands or apply diffs suggested by subagents without main-agent verification.
-- **No Overlapping Write Locks**: Never grant concurrent write permissions to multiple subagents on the same file path.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If subagent delegation returns invalid data or fails to complete within the timeout:
-
-```bash
-# Cancel failed subagent execution tasks
-# Revert any unverified file edits
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Fall back cleanly to single-agent execution in main agent
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Execute delegation validation commands:
-
-```bash
-# 1. Test delegation packet generator
-python3 scripts/codex_delegate.py --agent security-reviewer --objective "Audit auth code"
-
-# 2. Run agent deadlock and delegation depth simulator
-python3 scripts/simulate_agent_deadlock.py
-
-# 3. Validate RBAC schema compliance across subagents
-python3 scripts/validate_rbac_schema.py
-```
-
----
-
-## 8. Completion Report
-
-Report subagent roles used, objectives assigned, file scopes inspected, results accepted or rejected, main-agent verification commands executed, and final integrated solution status.
+Hosts other than Claude Code have their own delegation mechanisms (for Codex, see
+the agentkit Codex documentation). The workflow above applies regardless: split,
+brief, run in parallel, verify, merge.
