@@ -27,6 +27,11 @@ your install command with `--force` to replace them, for example
 `npx @indium-ai-labs/agentkit install --target=claude --force`. Project context
 files (`AGENTS.md`, `CLAUDE.md`) are never replaced.
 
+The installer never deletes files, so a 1.x bundle install keeps its old copy of
+`author-agentkit-content`, which the 2.0 bundle no longer manages. Delete that
+directory from your agent's skills folder, or refresh it with
+`add author-agentkit-content --force` if you contribute to agentkit.
+
 ### Added
 
 - Skills: `upgrade-dependencies`, `address-review-feedback`, `init-agent-context`,
