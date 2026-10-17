@@ -1,494 +1,211 @@
 ---
 name: threat-modeling
-description: "Perform structured threat modeling (STRIDE/PASTA) on architecture diagrams, system interfaces, and data flow graphs before implementation."
+description: "Build a threat model for a planned feature, service, or architecture change by mapping assets, data flows, and trust boundaries, enumerating STRIDE threats per boundary, scoring likelihood times impact, and assigning testable mitigations and residual-risk owners. Use before implementing or redesigning anything that handles sensitive data, authentication, payments, external integrations, or LLM tools. Not for reviewing code that already exists (use the security-review skill)."
 ---
 
 # Threat Modeling
 
-Identify security threats, attack vectors, trust boundaries, and mitigation
-controls **before** feature development or architectural overhaul. The
-baseline taxonomy is STRIDE (Spoofing, Tampering, Repudiation, Information
-Disclosure, Denial of Service, Elevation of Privilege); PASTA-style attacker
-and impact staging may supplement it when the project requires risk-centric
-scoring.
+Produce a threat model before code is written, so that mitigations become
+requirements instead of patches. The stance is **evidence-backed and
+pre-implementation**: every threat rests on a real component, data flow, and
+attacker, and every serious threat leaves with a mitigation, a planned test,
+and an owner for what remains.
 
-The skill is **pre-implementation and evidence-backed**: threats are derived
-from architecture diagrams, data flow graphs, API specifications, and auth
-models that actually exist in the repository, never from speculative
-scenarios. Every enumerated threat receives a likelihood/impact rating, a
-concrete mitigation, and a verification test. Adapt the documentation format
-to the project's architecture artifacts and record results in
-`templates/handoffs/threat-model.md`.
+## When to use
 
----
+- A new feature or service will handle personal, payment, health, or
+  credential data, or will expose a new public endpoint.
+- An architecture change adds a trust boundary: a new third-party API, queue,
+  data store, tenant model, admin surface, or LLM tool.
+- A design review, security sign-off, or customer questionnaire needs a
+  documented model.
+- An existing model is stale because the system changed.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- The code already exists and needs checking for defects: use the
+  `security-review` skill.
+- Readiness against a compliance framework: use the `compliance-audit` skill.
+- Cloud and infrastructure posture: use the `infrastructure-review` skill.
+- Choosing and implementing ciphers, signatures, or TLS settings: use the
+  `cryptographic-protocol-implementation` skill.
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Threat-model the new checkout flow from
-   browser through our API to the payments provider"*), the agent **must
-   automatically infer and populate** `system_spec`, `boundary_context`, and
-   `methodology_context` from the user's text and from repository evidence.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover from the repository and the request; ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ThreatModelingContextManifest",
-  "type": "object",
-  "required": ["system_spec", "boundary_context", "methodology_context"],
-  "properties": {
-    "system_spec": {
-      "type": "object",
-      "required": ["components", "data_stores"],
-      "properties": {
-        "components": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "data_stores": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "externals": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "assets": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
-      }
-    },
-    "boundary_context": {
-      "type": "object",
-      "required": ["trust_boundaries"],
-      "properties": {
-        "trust_boundaries": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["from", "to"],
-            "properties": {
-              "from": { "type": "string", "minLength": 1 },
-              "to": { "type": "string", "minLength": 1 },
-              "channel": { "type": "string", "enum": ["public_internet", "internal_network", "process_local", "third_party_api"] },
-              "data_classes": { "type": "array", "items": { "type": "string", "enum": ["pii", "payment", "health", "credentials", "public"] } }
-            }
-          },
-          "minItems": 1
-        }
-      }
-    },
-    "methodology_context": {
-      "type": "object",
-      "required": ["taxonomy", "scoring"],
-      "properties": {
-        "taxonomy": { "type": "string", "enum": ["stride", "pasta", "stride_with_pasta_scoring"], "default": "stride" },
-        "scoring": { "type": "string", "enum": ["dread", "cvss", "project_defined"], "default": "dread" },
-        "risk_threshold": { "type": "number", "minimum": 0, "default": 3.0 }
-      }
-    }
-  }
-}
+- **Scope:** the feature, service, or change; the feature brief, plan, or
+  API contract if one exists.
+- **Architecture evidence:** design docs, ADRs, diagrams, API specs, auth
+  model, deployment topology, and the code paths involved.
+- **Existing models:** for example under `docs/security/threat-models/`. Update
+  an existing model rather than creating a duplicate.
+- **Data classification policy**, if the project has one.
+- **Risk scale and appetite:** the project's scoring scale, the threshold that
+  requires mitigation before implementation, and who may accept residual risk.
+- **Save location:** the project's documentation convention for security
+  artifacts.
+
+## Workflow
+
+1. **Recon.** Read `AGENTS.md`, the design material, and the relevant code.
+   Where documentation is missing or stale, reconstruct the data flow from code
+   (routes, clients, queries, queue producers and consumers). Label each
+   element as documented, code-derived, or assumed. Never present an assumption
+   as fact.
+2. **List assets and classify data.** Assets worth attacking: records,
+   credentials and sessions, money movement, admin capabilities, model and tool
+   access, and the availability of the service. Classify the data on each flow
+   (for example public, internal, personal, payment, health, credentials) using
+   the project's policy where one exists.
+3. **Draw the data flow and enumerate trust boundaries.** List processes, data
+   stores, external entities, and flows. A trust boundary is any point where
+   data passes between different levels of trust: browser to API, API to
+   database, service to third party, job runner to queue, untrusted content
+   into an LLM context. For each boundary record the channel, the
+   authentication on the crossing, and the data classes carried. Every flow
+   that crosses a trust level must appear; a model with no boundaries is wrong.
+   A Mermaid flowchart is optional; a table is enough.
+4. **Enumerate STRIDE threats per boundary.** For each boundary, ask:
+   - **Spoofing:** can an attacker impersonate a user, a service, or the
+     endpoint on the other side?
+   - **Tampering:** can data in transit or at rest be modified (payload edits,
+     row updates, queue messages, retrieved documents that steer a model)?
+   - **Repudiation:** can an actor act without an audit record tying the action
+     to their identity?
+   - **Information disclosure:** can data leak through responses, errors, logs,
+     caches, side channels, or tool calls that send data outward?
+   - **Denial of service:** can resources be exhausted (unbounded payloads,
+     expensive queries, retry storms, quota or token abuse)?
+   - **Elevation of privilege:** can an actor gain control they should not
+     have (missing object-level checks, role confusion, confused deputies, a
+     model invoking a privileged tool on injected instructions)?
+
+   Record only threats with evidence: a real crossing, a real data class, and a
+   plausible attacker. If a boundary has no credible threat in a category,
+   record "assessed, none credible" with the reason, so coverage is visible.
+5. **Score.** Unless the project defines a scale, rate likelihood and impact
+   each from 1 to 5 and multiply them, giving a risk from 1 to 25.
+   - Likelihood: 1 needs rare insider access or chained exploits; 3 needs an
+     authenticated user or a known technique; 5 is trivial for an anonymous
+     attacker.
+   - Impact: 1 is negligible; 3 is limited data exposure or degraded service
+     for some users; 5 is broad data compromise, financial loss, or full outage.
+   - Thresholds follow the project's risk appetite; for example, 15 or more
+     must be mitigated before implementation, 8 to 14 must be mitigated or
+     formally accepted, and lower scores are recorded.
+   - DREAD (the average of five 1-to-5 factors) is optional and subjective; use
+     it only if the project already does. Never mix scales within one model.
+6. **Design mitigations.** For each threat at or above the threshold, name a
+   concrete control mapped to a component and boundary: request signing,
+   mTLS, object-level authorization, parameterized queries, rate limits,
+   schema validation, audit logging, token rotation, egress allowlists, human
+   confirmation for consequential tool calls. Prefer controls that fail closed.
+   "Add more security" is not a control. Give each mitigation a planned
+   verification test that follows the project's test layout.
+7. **Assess residual risk.** For each threat, state what remains after
+   mitigation and why it is acceptable. Residual risk needs a named owner (a
+   role or person the user identifies). Do not accept risk on anyone's behalf;
+   list unowned items as open questions.
+8. **Write the handoff document** using the headings in Report. Save it where
+   the project keeps security documents, for example
+   `docs/security/threat-models/checkout-flow.md`. Do not save it over a
+   template file. If a model already exists at that path, update it and keep
+   its history; ask before replacing it wholesale. Reference it from the
+   feature brief or plan it gates.
+
+## Worked example: threat inventory excerpt
+
+Illustrative rows for a checkout flow (browser to checkout API to order
+database to payments provider), scored likelihood (L) times impact (I).
+
+```markdown
+| ID  | Boundary          | STRIDE      | Threat and evidence                                          | L | I | Risk | Mitigation (component)                    | Planned test                              |
+|-----|-------------------|-------------|--------------------------------------------------------------|---|---|------|-------------------------------------------|-------------------------------------------|
+| T-1 | TB-1 browser->API | Spoofing    | Stolen session token confirms orders as another user;        | 3 | 4 | 12   | Rotate token at checkout start, bind it   | Pre-rotation token rejected at confirm    |
+|     |                   |             | 24-hour tokens, no rotation (src/auth/session.ts, code)      |   |   |      | to the cart (checkout-api)                |                                           |
+| T-2 | TB-2 API->DB      | Tampering   | Order notes concatenated into a raw UPDATE; can alter other  | 4 | 5 | 20   | Parameterize; add tenant predicate to     | Metacharacter payload changes zero rows   |
+|     |                   |             | tenants' rows (src/repos/orders.ts, code-derived)            |   |   |      | every order mutation (checkout-api)       |                                           |
+| T-3 | TB-3 API->provider| Repudiation | Disputed charge cannot be tied to a user action; no audit    | 3 | 3 | 9    | Append-only audit row (actor, cart,       | Audit row exists for every charge         |
+|     |                   |             | event links confirmation to the provider charge ID           |   |   |      | charge ID) before the provider call       |                                           |
+| T-4 | TB-1 browser->API | DoS         | Unbounded confirm attempts exhaust provider quota; no rate   | 4 | 3 | 12   | Per-user and per-IP rate limit, circuit   | Requests over the limit return 429;       |
+|     |                   |             | limit on POST /checkout/confirm                              |   |   |      | breaker on provider errors                | breaker opens in test                     |
+
+Residual: T-1 token theft through XSS remains until the CSP work lands.
+Owner: security lead (to be confirmed by the user). T-4 distributed abuse
+above per-IP limits needs an edge rule; owner: platform team.
 ```
 
-### Automatic Natural Language Inference & Safety Rules
+## Guardrails
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+- Revert or delete only files you created in this session, and say so. Never
+  discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions.
+- Never weaken a test, check, or threshold to make work pass, and never lower a
+  score to avoid a required mitigation.
+- Write only the threat-model document (and the plan or brief reference, if
+  asked). Do not change system code while modeling.
+- Do not run penetration tests or exploits against live systems; reason from
+  architecture and code, and validate through scoped tests later.
+- Keep secrets, tokens, real payloads, and customer data out of the model.
+  Name secret-store entries with placeholders.
+- Never claim all threats are eliminated. A model produced after
+  implementation is a review: say so and use the `security-review` skill.
 
-- **`system_spec.components`**: Extracted from the prompt nouns and confirmed
-  against the repository (routes, services, workers, frontends). Components
-  that cannot be confirmed from code or docs are marked assumed, not
-  silently invented.
-- **`data_stores`**: Detected from ORM configuration, connection modules,
-  cache clients, and bucket references in the scoped code paths.
-- **`externals`**: Detected from outbound HTTP clients, SDK imports, and
-  webhook registrations in scope (payment providers, email services,
-  identity providers).
-- **`assets`**: Derived from the data classes the scoped components handle:
-  account records, credentials, payment instruments, session tokens.
-- **`trust_boundaries`**: Enumerated from actual crossings: browser to API,
-  API to database, API to third-party, job runner to queue. Every component
-  pair that exchanges data across a trust level must appear; an empty
-  boundary list is invalid.
-- **`methodology_context`**: Defaults to `stride` taxonomy with `dread`
-  scoring. Reuse a project-defined scoring model when the repository or
-  security policy declares one; never invent a new scale mid-review.
-- **Evidence rule**: If no architecture documentation exists, build the data
-  flow graph from code and say so explicitly; do not present inferred
-  structure as documented fact.
+## Verification
 
----
+- Every trust boundary has at least one assessment, including "assessed, none
+  credible" entries with reasons.
+- Every threat at or above the threshold has a mitigation mapped to a
+  component and a planned test.
+- Every residual risk has an owner or appears under open questions.
+- Every evidence reference resolves to a real file or document, and
+  code-derived or assumed elements are labeled.
+- The document contains every heading in Report. If the project lints
+  Markdown, run its command on the file and report the result.
+- After implementation, the mapped tests exist and pass with the project's
+  test command before the model is marked closed.
 
-## 2. Deterministic State Machine Execution Flow
+## Report
 
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
+Return the saved path, the number of boundaries and threats, the top risks
+with scores, unowned residual risks, open questions, and what was not
+verified (for example, assumed components or undocumented deployment details).
 
-### Step 1: Context Ingestion & Architecture Recon
+<!-- handoff: threat-model -->
+```markdown
+# Threat model: <system or feature name>
 
-1. Read `AGENTS.md`, system architecture documentation, data flow diagrams,
-   API specs, and auth models present in the repository.
-2. Map key assets, data stores, external dependencies, and deployment
-  topology for the scoped system.
-3. Where documentation is stale or missing, reconstruct the data flow graph
-   from code (routes, clients, queries) and flag each reconstructed edge as
-   code-derived evidence.
+## Scope and system overview
+In-scope components, data stores, external entities, and flows; evidence
+sources (documents read, code paths reconstructed); assumptions.
 
-### Step 2: Asset & Data Classification
+## Trust boundaries and assets
+| Boundary | From | To | Channel | Auth on crossing | Data classes | Assets |
 
-1. List the assets worth attacking: data records, credentials, sessions,
-   money movement, admin capabilities, availability of the service itself.
-2. Classify data crossing each edge: `pii`, `payment`, `health`,
-   `credentials`, or `public`, using the project's data classification
-   policy where one exists.
-3. Rank assets by business impact so scoring in Step 5 reflects real
-   consequences rather than abstract severity.
+## STRIDE threat inventory
+| ID | Boundary | STRIDE | Threat and evidence | Likelihood | Impact | Risk | Mitigation (component) | Planned test |
+Scale used and the mitigation threshold.
 
-### Step 3: Trust Boundary Enumeration
+## Residual risk assessment
+| Threat | Residual risk | Rationale | Owner | Follow-up |
 
-1. Identify trust boundaries: every point where data passes between
-   different levels of trust (e.g. browser to web server, web server to
-   database, internal service to third-party API, job runner to queue).
-2. For each boundary, record the channel (`public_internet`,
-   `internal_network`, `process_local`, `third_party_api`), the
-   authentication mechanism on the crossing, and the data classes carried.
-3. Verify completeness: every component pair in the data flow graph that
-   crosses a trust level must be represented as a boundary. The coverage
-   invariant in Section 5 makes this checkable.
+## Open questions
+Decisions needed from security, product, or operations before implementation.
 
-### Step 4: STRIDE Threat Enumeration per Boundary
-
-Enumerate threats across each trust boundary using STRIDE:
-
-- **Spoofing**: Can an attacker impersonate a user, service, or the
-  third-party endpoint on this crossing?
-- **Tampering**: Can data in transit or at rest be modified without
-  authorization (payload edits, row updates, queue message flips)?
-- **Repudiation**: Can an actor perform an action without audit trail proof
-  tying the action to their identity?
-- **Information Disclosure**: Can sensitive data be leaked through
-  responses, errors, logs, caches, or side channels on this crossing?
-- **Denial of Service**: Can resources be exhausted or rendered unavailable
-  (unbounded payloads, expensive queries, retry storms, quota abuse)?
-- **Elevation of Privilege**: Can an unprivileged actor gain privileged
-  control across this boundary (role confusion, missing object-level checks,
-  confused deputies)?
-
-Record only threats backed by architectural evidence: a real crossing, a
-real data class, and a plausible attacker. Speculative or irrelevant
-vulnerability scenarios are excluded.
-
-### Step 5: Risk Scoring & Prioritization
-
-1. Rate each threat's likelihood and impact using the declared scoring model
-   (DREAD average or CVSS base score) per the formulas in Section 5.
-2. Sort threats by composite risk; anything at or above `risk_threshold`
-   requires a mitigation before implementation proceeds.
-3. Reuse the project's existing risk scale when one is defined; document the
-   scale used so scores are comparable across models.
-
-### Step 6: Mitigation Control Design
-
-1. Formulate concrete mitigation controls for each threat at or above the
-   threshold: mTLS, request signing, rate limiting, role-based access
-   control, input sanitization, audit logging, token expiry, schema
-   validation.
-2. Every mitigation must be implementable in this repository and must map to
-   a specific component and boundary; "add more security" is not a control.
-3. Prefer controls that fail closed and that are verifiable by an automated
-   test (Section 4).
-
-### Step 7: Residual Risk & Verification Follow-up
-
-1. Document residual risk for each threat after mitigation: what remains,
-   why it is accepted, and who accepts it.
-2. Define the follow-up verification tests that will prove each mitigation
-   works (penetration-style unit tests, integration checks, config audits).
-3. Record open questions that need security-team or stakeholder decisions
-   before implementation begins.
-
-### Step 8: Record Findings in the Threat-Model Handoff
-
-1. Record the completed model in `templates/handoffs/threat-model.md` or the
-   equivalent project artifact, following that template's sections.
-2. Ensure the artifact is self-contained: a reader can reconstruct the
-   boundaries, threats, scores, mitigations, and residual risks without
-   rerunning the analysis.
-3. Link (by path reference in backticks, not hyperlink) the handoff from the
-   feature brief or implementation plan it gates.
-
----
-
-## 3. Reference Implementation: Completed Threat Model Document
-
-```yaml
-# Threat model: checkout flow (browser -> API -> DB -> payments provider).
-# Artifact format follows templates/handoffs/threat-model.md.
-threat_model:
-  id: TM-2026-007-checkout-flow
-  date: 2026-08-14
-  methodology: stride_with_pasta_scoring
-  scoring: dread
-  risk_threshold: 3.0
-  author: threat-modeling skill (single agent)
-
-system:
-  components: [web-browser-spa, checkout-api, order-db, payments-provider]
-  data_stores: [order-db (postgres), session-cache (redis)]
-  externals: [payments-provider]
-  assets: [payment-instruments, order-records, session-tokens, admin-console]
-
-trust_boundaries:
-  - id: TB-1
-    from: web-browser-spa
-    to: checkout-api
-    channel: public_internet
-    data_classes: [payment, pii, credentials]
-    auth: bearer session token (httpOnly cookie)
-  - id: TB-2
-    from: checkout-api
-    to: order-db
-    channel: internal_network
-    data_classes: [payment, pii]
-    auth: database role checkout_rw (least privilege)
-  - id: TB-3
-    from: checkout-api
-    to: payments-provider
-    channel: third_party_api
-    data_classes: [payment]
-    auth: API key in secret store, TLS 1.3, signed webhooks inbound
-
-threats:
-  - id: T-1
-    boundary: TB-1
-    stride: Spoofing
-    threat: Attacker replays or forges a session token to place orders as
-            another user.
-    evidence: Login issues 24h tokens; checkout-api accepts any unexpired
-              token without binding to device or rotation.
-    dread: { damage: 4, reproducibility: 3, exploitability: 3, affected: 4, discoverability: 2 }
-    risk: 3.2
-    mitigations:
-      - control: Rotate session tokens on checkout start; bind to cart id.
-        component: checkout-api
-        verify: Integration test rejects pre-rotation token at /checkout/confirm.
-    residual: Token theft via XSS remains; accepted pending CSP hardening
-              ticket SEC-118.
-
-  - id: T-2
-    boundary: TB-2
-    stride: Tampering
-    threat: SQL injection in order notes mutates other tenants' rows.
-    evidence: orders.notes concatenated into a raw UPDATE in
-              src/repos/orders.ts (code-derived edge).
-    dread: { damage: 5, reproducibility: 4, exploitability: 3, affected: 5, discoverability: 3 }
-    risk: 4.0
-    mitigations:
-      - control: Parameterize the update through the query builder; add
-                 tenant predicate to every order mutation.
-        component: checkout-api
-        verify: Security unit test with metacharacter payload mutates zero
-                rows; pg audit shows parameterized statements only.
-    residual: None identified after parameterization.
-
-  - id: T-3
-    boundary: TB-3
-    stride: Repudiation
-    threat: Disputed charge cannot be tied to a user action.
-    evidence: No audit event links checkout confirmation to provider
-              charge id.
-    dread: { damage: 3, reproducibility: 4, exploitability: 2, affected: 3, discoverability: 4 }
-    risk: 3.2
-    mitigations:
-      - control: Write immutable audit row (actor, cart, charge id, hash
-                 chain) before calling the provider.
-        component: checkout-api
-        verify: Test asserts audit row exists for every successful charge.
-    residual: Provider-side logs remain the system of record for disputes.
-
-  - id: T-4
-    boundary: TB-1
-    stride: DenialOfService
-    threat: Unbounded checkout attempts exhaust payments-provider quota.
-    evidence: No rate limit on POST /checkout/confirm.
-    dread: { damage: 3, reproducibility: 5, exploitability: 4, affected: 4, discoverability: 4 }
-    risk: 4.0
-    mitigations:
-      - control: Per-user and per-IP rate limit (10/min) with 429 envelope;
-                 circuit breaker on provider 5xx.
-        component: checkout-api
-        verify: Load test at 100 rps sustains quota; breaker opens in test.
-    residual: Distributed abuse above limits needs WAF rule (ops follow-up).
+## Handoff
+**Changed contract:** Security requirements this model adds to the feature.
+**Files / systems affected:** Components and boundaries that need mitigations.
+**Evidence and tests:** Evidence sources and the planned tests per mitigation.
+**Risks / rollback:** Residual risks, accepted risks, and their owners.
+**What the next agent needs:** Mitigation tasks in priority order.
 ```
 
----
+## Optional delegation
 
-## 4. Mitigation-to-Test Mapping & Residual-Risk Sign-Off Pattern
-
-Every mitigation declared in the model must map to a concrete verification
-test, and every residual risk must carry an explicit sign-off. Unmapped
-mitigations block the model from closing.
-
-```bash
-# Mitigation-to-test mapping ledger (one line per mitigation).
-cat > threat-model-verification.tsv <<'EOF'
-threat_id	mitigation	test_artifact	test_type	status
-T-1	rotate session tokens at checkout start	tests/security/session-rotation.test.ts	integration	pending
-T-2	parameterize order mutations + tenant predicate	tests/security/order-injection.test.ts	unit	pending
-T-3	immutable audit row before provider call	tests/security/charge-audit.test.ts	integration	pending
-T-4	rate limit + provider circuit breaker	load/checkout-confirm.k6.js	load	pending
-EOF
-
-# Residual-risk sign-off record (appended to the threat-model handoff).
-cat >> threat-model-signoff.md <<'EOF'
-## Residual risk sign-off
-- T-1 residual: session theft via XSS. Accepted by: <security-owner>.
-  Compensating follow-up: SEC-118 CSP hardening, due next release.
-- T-3 residual: provider-side dispute logs. Accepted by: <product-owner>.
-- T-4 residual: distributed abuse above app limits. Accepted by: <ops-owner>.
-  Compensating follow-up: WAF rule request NET-204.
-
-Sign-off rule: every residual risk names an accountable owner and either an
-acceptance rationale or a tracked follow-up item. Blank sign-offs are
-treated as unmitigated threats at their original score.
-EOF
-
-# Coverage check: every trust boundary enumerated has at least one threat,
-# and every threat at/above threshold has at least one mapped test.
-python - <<'PY'
-import csv, sys
-rows = list(csv.DictReader(open("threat-model-verification.tsv"), delimiter="\t"))
-assert all(r["test_artifact"] for r in rows), "unmapped mitigation found"
-print(f"coverage ok: {len(rows)} mitigations mapped to tests")
-PY
-```
-
----
-
-## 5. Risk, Scoring & Coverage Invariants
-
-Composite risk is the product of likelihood and impact; prioritization sorts
-by this product and mitigation is mandatory at or above the threshold
-$\theta$:
-
-$$\text{Risk}(t) = \text{Likelihood}(t) \times \text{Impact}(t), \qquad \text{Risk}(t) \ge \theta \Rightarrow \text{mitigationRequired}(t)$$
-
-DREAD scoring averages the five factors, each rated on the project's scale
-(1-5 by default):
-
-$$\text{DREAD}(t) = \frac{D + R + E + A + Di}{5}$$
-
-Boundary coverage is total: every enumerated trust boundary contributes at
-least one evidenced threat assessment (a confirmed "no threat found, with
-reasons" entry counts as an assessment):
-
-$$\forall b \in \text{TrustBoundaries}: \; \#\{t \in \text{Threats} : t.\text{boundary} = b\} \ge 1$$
-
-Mitigation traceability is total for in-scope risks: every threat at or
-above the threshold maps to at least one verification test:
-
-$$\forall t : \text{Risk}(t) \ge \theta \Rightarrow \exists\, v \in \text{Tests} : v.\text{covers}(t)$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **Evidence-Backed Threats Only**: Focus on actionable threats backed by
-  architectural evidence; avoid speculative or irrelevant vulnerability
-  scenarios. A threat without a real crossing, data class, and attacker is
-  excluded or explicitly marked as an open question.
-- **Pre-Implementation Timing**: Run the model before feature development or
-  architectural overhaul; a model produced after implementation is a
-  review, not a threat model, and should route to the `security-review`
-  workflow instead.
-- **Complete Boundary Enumeration**: Enumerate every trust boundary in the
-  data flow graph before scoring; do not score threats against a partial
-  graph.
-- **Reuse Project Scales**: Use the project's declared scoring model and
-  risk threshold when they exist; never mix scales within one model.
-- **Single-Agent Executable**: An optional security-reviewer subagent can
-  inspect data flow graphs for a second pass, but one agent can complete
-  this workflow independently.
-
-### Security Invariants
-
-- **No Live Exploitation**: Do not execute penetration tests or exploits
-  against live systems. Threats are reasoned from architecture and code
-  evidence; validation happens through scoped tests, not attacks.
-- **No Secret Material in Models**: Never record real credentials, keys, or
-  tokens in the threat model; reference secret-store entries with
-  `<placeholder>` names only.
-- **Data Minimization in Artifacts**: The model names data classes and
-  flows, not production records; never paste customer data, real payloads,
-  or internal identifiers beyond what the trace requires.
-- **Honest Residual Risk**: Residual risk is recorded with an accountable
-  owner; the model never claims all threats are eliminated.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Threat modeling writes only analysis artifacts (the threat-model handoff,
-verification ledgers, sign-off records); it never modifies system code. If
-artifact generation fails or produces an inconsistent document that cannot
-be repaired within 2 iterations, execute targeted rollback restricted ONLY
-to files created or modified during this run:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-# (normally none: the workflow edits no system code)
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked artifacts from this execution run
-# (e.g. the partial threat-model handoff and scratch ledgers)
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
-After executing targeted rollback, confirm the repository contains no
-partial model artifacts from this run, then output the exact error trace
-and state failure causes. Never delete prior threat-model versions or
-sign-off records that predate this run.
-
----
-
-## 8. Verification Plan & Analysis Toolchain Commands
-
-Execute the following read-only commands to build and validate the model;
-adapt tool names to the project's declared scripts:
-
-```bash
-# 1. Reconstruct the data flow surface from code evidence
-rg -n "fetch\(|axios|grpc|amqp|pg\.|redis\." src/ --glob '!*.test.*'
-rg -n "router\.(get|post|put|patch|delete)" src/routes/
-
-# 2. Enumerate authentication and authorization controls per component
-rg -n "requireAuth|verifyToken|mTLS|signing|authorize" src/
-
-# 3. Confirm external dependencies and outbound channels
-rg -n "https?://" src/ --glob '!*.test.*' | rg -v "localhost|example"
-
-# 4. Validate the handoff artifact structure against the template
-python scripts/validate_handoff.py templates/handoffs/threat-model.md
-
-# 5. Run the mitigation-to-test coverage check (Section 4)
-python scripts/check_threat_coverage.py threat-model-verification.tsv  # or inline python heredoc
-
-# 6. Re-run after implementation begins: tests mapped in the ledger must
-#    exist and pass before the model is marked closed.
-npm run test -- tests/security/
-```
-
----
-
-## 9. Completion Report
-
-Report the system scope and evidence sources used (documents read, code
-paths reconstructed); the assets mapped with their data classifications; the
-trust boundaries evaluated with channels and auth mechanisms; the threats
-enumerated by STRIDE category per boundary with their evidence; the risk
-ratings and the scoring scale applied; the proposed mitigations with their
-component owners and mapped verification tests; the residual risks with
-accountable sign-offs; the open questions escalated for decision; and the
-location of the recorded handoff artifact (`templates/handoffs/threat-model.md`
-or the project equivalent).
+The `security-reviewer` subagent can check the model against the code for
+missed boundaries or flows and challenge the scores; the `plan-reviewer`
+subagent can confirm that the implementation plan includes every required
+mitigation. Re-check their findings before changing the model. One agent can
+complete this workflow alone.

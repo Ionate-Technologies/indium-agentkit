@@ -1,345 +1,137 @@
 ---
 name: compliance-audit
-description: "Audit code, configuration, and data flows against GDPR, SOC 2, HIPAA, and PCI-DSS compliance controls including PII redaction and audit logging."
+description: "Assess code, configuration, and data flows for readiness against GDPR, SOC 2, HIPAA, or PCI DSS controls, covering the regulated-data inventory, PII in logs, encryption, access control, audit logging, and retention and erasure, with a findings register that cites control references. Use when preparing for an audit, a customer security questionnaire, or a launch that handles regulated data. A readiness assessment, not certification or legal advice; not for exploit-focused review (use the security-review skill)."
 ---
 
 # Compliance Audit
 
-Audit a codebase, its configuration, and its data flows for compliance
-readiness against **GDPR**, **SOC 2**, **HIPAA**, or **PCI-DSS** control
-frameworks. The audit focuses on data privacy, access control, audit
-logging, encryption, and data retention/deletion hooks, and produces a
-severity-ranked findings register with framework control references and
-remediation guidance.
+Assess whether the code, configuration, and data flows in scope support the
+technical controls of a compliance framework, and report the gaps with
+redacted evidence. This is a **readiness assessment, not certification or
+legal advice**. Say so in every report. Only an accredited auditor or assessor
+can attest compliance, and many controls (policies, training, vendor contracts,
+physical security) cannot be seen in a repository at all.
 
-Default tooling: repository-wide static scans with a small standard-library
-Python script for regulated-data exposure patterns, the project's own test
-runner for redaction regression tests, and read-only queries against log or
-audit stores. Before scanning, inspect the repository and adapt to existing
-conventions: read `AGENTS.md`, data models, logging and telemetry
-configuration, auth modules, infrastructure definitions, and any existing
-compliance documentation. The audit is evidence-driven: every finding cites
-a file, line, or configuration value observed in the tree, and every
-excerpt is redacted before it enters the evidence record.
+## When to use
 
----
+- Preparing for a SOC 2 audit, a PCI DSS assessment, a HIPAA risk analysis, or
+  a GDPR review, and engineering needs to know where the code stands.
+- A customer security questionnaire asks how the system handles logging,
+  encryption, access, retention, or deletion.
+- A feature will start storing or processing personal, health, or card data.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Looking for exploitable defects: use the `security-review` skill.
+- Designing a new system's threat mitigations: use the `threat-modeling` skill.
+- Third-party package licenses and vulnerabilities: use the `dependency-audit` skill.
+- A secret is exposed right now: use the `secret-leak-response` skill.
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Audit the billing service for GDPR
-   readiness, focused on PII in logs and the deletion workflow"*), the
-   agent **must automatically infer and populate** `audit_scope`,
-   `data_classification_context`, and `evidence_context` from the user's
-   text and the existing repository conventions.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover from the repository first; ask the user about the rest.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ComplianceAuditContextManifest",
-  "type": "object",
-  "required": ["audit_scope", "data_classification_context"],
-  "properties": {
-    "audit_scope": {
-      "type": "object",
-      "required": ["frameworks", "services"],
-      "properties": {
-        "frameworks": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["gdpr", "soc2", "hipaa", "pci_dss"] },
-          "minItems": 1
-        },
-        "services": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }, "minItems": 1 },
-        "in_scope_paths": { "type": "array", "items": { "type": "string" }, "default": [] }
-      }
-    },
-    "data_classification_context": {
-      "type": "object",
-      "required": ["data_classes"],
-      "properties": {
-        "data_classes": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["pii", "phi", "pci", "credentials", "telemetry"] },
-          "minItems": 1
-        },
-        "regulated_fields": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Concrete model fields under regulation, e.g. customer.email, patient.diagnosis, card.number."
-        }
-      }
-    },
-    "evidence_context": {
-      "type": "object",
-      "required": ["output_format", "evidence_dir"],
-      "properties": {
-        "output_format": { "type": "string", "enum": ["yaml_register", "markdown_report", "json"], "default": "yaml_register" },
-        "evidence_dir": { "type": "string", "pattern": "^[a-z0-9/_.-]+$" },
-        "fail_on_severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "none"], "default": "high" }
-      }
-    }
-  }
-}
+- **Framework and version:** for example GDPR, SOC 2 (Trust Services Criteria
+  and which categories are in scope), the HIPAA Security Rule, or PCI DSS
+  v4.0.1 and the assessment type. If the framework is unclear, ask.
+- **The framework text or control matrix** the organization uses. Ask for it;
+  citations are only as good as the source you check them against.
+- **Scope:** services, paths, environments, and data classes. For PCI DSS, the
+  cardholder data environment and what is out of scope.
+- **Evidence sources:** data models and migrations, logging and telemetry
+  configuration, auth and session code, infrastructure definitions, retention
+  jobs, existing compliance docs and policies (data classification, retention
+  schedule, incident response).
+- **Live access**, if any: read-only replicas or exported configuration, and
+  the user's approval to query them.
+- **Where to save the report**, following the project's conventions.
+
+## Workflow
+
+1. **Fix the scope in writing.** Record the frameworks, versions, services,
+   paths, and data classes, so every finding is attributable.
+2. **Build the regulated-data inventory.** Map each regulated field (from
+   schemas, ORM models, and API types) to its entry points (handlers,
+   consumers, importers), stores (tables, object storage, caches, search
+   indexes, backups), and egress (responses, webhooks, exports, analytics,
+   third-party processors). Mark uncontrolled copies (debug dumps, local
+   caches, analytics events) as candidate findings.
+3. **Check logs, telemetry, and error traces.** Search log and telemetry call
+   sites for the inventory's field names and for whole request or model
+   objects passed to loggers. Confirm redaction helpers are used and cannot be
+   bypassed by interpolating a raw object. Check error handlers for request
+   dumps and stack traces in responses.
+4. **Check encryption and key management.**
+   - In transit: TLS 1.2 or later on every channel carrying regulated data,
+     TLS 1.3 preferred; TLS 1.0 and 1.1 disabled; certificate verification on.
+   - At rest: databases, backups, object stores, and queues holding regulated
+     data use strong encryption (for example AES-256 through the platform's
+     managed encryption).
+   - Keys come from a KMS or secret manager, rotate per policy, and never
+     appear in the repository or plaintext configuration.
+5. **Check access control, tenancy, and sessions.** Least privilege for
+   service accounts and roles; authorization enforced server-side; tenant
+   isolation on every read and write path; MFA where the framework requires it;
+   session timeout, token lifetime, and revocation; break-glass and admin paths
+   that are authenticated, authorized, and logged.
+6. **Check audit logging.** Security-relevant events (login, permission
+   change, data export, admin action, access to regulated records) produce
+   records with actor, action, target, timestamp, outcome, and source. Records
+   are append-only or tamper-evident and retained for the required window. Where
+   read-only access is approved, sample real events against the audit store to
+   measure completeness instead of trusting the instrumentation.
+7. **Check retention and erasure.** Retention jobs or lifecycle rules actually
+   run, not just exist in a policy. Erasure reaches every store in the
+   inventory, including search indexes, caches, analytics, and processors. If
+   backups are not edited, document when they expire and how restored data is
+   purged again. Compare the path end to end against the organization's
+   deadline (GDPR Art. 12(3) sets one month to respond to a request, extendable
+   in some cases).
+8. **Write the findings register.** Re-read each finding at its `path:line`.
+   For each: ID, severity, confidence, control reference, location, redacted
+   evidence, impact, remediation direction, and a suggested owner. State what
+   was not verified.
+
+## Citing control references
+
+Cite at the level you can verify. Check every control ID against the framework
+text you have. If you cannot, cite the article or requirement number only and
+mark it "reference not verified". Never invent sub-numbers. Starting points:
+
+- **GDPR:** Art. 5(1)(c) data minimisation, 5(1)(e) storage limitation,
+  5(1)(f) integrity and confidentiality; Art. 17 erasure; Art. 25 data
+  protection by design and by default; Art. 30 records of processing; Art. 32
+  security of processing; Art. 33 breach notification.
+- **SOC 2 Trust Services Criteria:** CC6 logical and physical access controls
+  (for example CC6.1 logical access, CC6.7 restricting transmission of
+  information); CC7 system operations, including monitoring and incident
+  detection (for example CC7.2); CC8.1 change management; C1 confidentiality,
+  including disposal. Auditors map evidence to the organization's own
+  controls, so cite those when the user provides them.
+- **HIPAA Security Rule, 45 CFR 164.312 technical safeguards:** (a)(1) access
+  control, (b) audit controls, (c)(1) integrity, (d) person or entity
+  authentication, (e)(1) transmission security. Some implementation
+  specifications are "addressable" rather than "required"; check the current
+  rule text, since HHS has proposed changes to the Security Rule.
+- **PCI DSS v4.0.1:** Requirement 3 (protect stored account data; for example
+  3.5.1 renders PAN unreadable wherever it is stored, including logs);
+  Requirement 4 (strong cryptography in transmission, 4.2.1); Requirement 7
+  (access by need to know); Requirement 8 (identification and authentication,
+  including MFA); Requirement 10 (logging and monitoring; 10.5.1 sets audit log
+  retention).
+
+## Reference snippets
+
+Illustrative searches for step 3; replace the field names with the inventory's
+and adapt the logger names to the stack:
+
+```bash
+rg -n -i '(log|logger|console)\.(debug|info|warn|error)\(.*\b(email|phone|ssn|dob|card_?number|diagnosis)\b' src/
+rg -n -i '(log|logger)\.\w+\(.*\b(req|request)\.(body|headers)\b' src/
 ```
 
-### Automatic Natural Language Inference & Safety Validation Rules
-
-If no raw JSON payload is provided, apply these defaults and safety checks:
-
-- **`frameworks`**: Extracted from the prompt or detected from existing
-  compliance documentation and policy files. If the framework is ambiguous
-  after inspecting the repository, ask before assuming one.
-- **`services`**: Inferred from the prompt's service names or the
-  repository layout (top-level service directories, workspace packages).
-- **`data_classes`**: Inferred from data models and migrations: fields such
-  as email, phone, address, or date of birth imply `pii`; diagnosis or
-  treatment fields imply `phi`; card number or CVV fields imply `pci`.
-- **`regulated_fields`**: Enumerated from schema definitions and ORM models
-  so scanning rules match the project's actual field names.
-- **`evidence_context`**: Defaults to `output_format: "yaml_register"` and
-  `evidence_dir: "compliance/evidence/<audit-date>"`.
-- **Safety validation**: ABORT execution immediately if the audit is asked
-  to modify production authorization rules or audit-log settings, to scan a
-  production write path, or to copy raw regulated values into evidence
-  files. Audits are read-only and every captured excerpt is redacted.
-
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
-
-### Step 1: Scope, Framework & Repository Discovery
-
-1. Read `AGENTS.md`, compliance requirements, data models, logging
-   configurations, auth schemes, and storage definitions.
-2. Identify the target compliance framework(s) and enumerate the concrete
-   controls each finding will reference (for example SOC 2 CC7.2, GDPR
-   Art. 17, PCI-DSS 3.3, HIPAA 164.312).
-3. Fix the audit scope in writing: services, paths, and data classes under
-   review, so findings stay attributable.
-
-### Step 2: Regulated Data Flow Tracing
-
-1. Trace Personally Identifiable Information (PII), Protected Health
-   Information (PHI), or Payment Card Data (PCI) across entry points
-   (HTTP handlers, message consumers, importers), storage (tables, object
-   stores, caches), and egress points (API responses, webhooks, exports,
-   third-party analytics).
-2. Build a data inventory mapping each regulated field to its stores and
-   flows; this inventory anchors every later finding.
-3. Mark uncontrolled copies (debug dumps, local caches, analytics events)
-   as candidate findings immediately.
-
-### Step 3: PII Redaction in Logs, Telemetry & Error Traces
-
-1. Verify PII redaction in logs, telemetry, error traces, and third-party
-   analytics. Check that sensitive fields are never logged in plaintext.
-2. Scan log call sites for regulated field references that bypass the
-   project's redaction helpers; scan error handling for stack traces or
-   request dumps that embed user data.
-3. Confirm redaction helpers themselves cannot be bypassed by string
-   interpolation of raw model objects.
-
-### Step 4: Encryption Controls & Key Management
-
-1. Verify encryption in transit: TLS 1.2 or higher on every external and
-   internal channel carrying regulated data; reject configurations that
-   negotiate TLS 1.0/1.1.
-2. Verify encryption at rest: strong algorithms (AES-256 or equivalent) on
-   databases, backups, object stores, and queue payloads holding regulated
-   data.
-3. Inspect secret and key management: keys come from a managed store or
-   KMS, rotate on a schedule, and never appear in the repository or in
-   plaintext configuration.
-
-### Step 5: Access Control, Tenancy & Session Policy
-
-1. Inspect access control mechanisms: Principle of Least Privilege on
-   service accounts and roles, role-based authorization enforced on the
-   server, and multi-tenant isolation on every read and write path.
-2. Verify session management: timeout policies, token lifetimes, and
-   revocation behavior match the framework's expectations.
-3. Confirm administrative and break-glass paths are themselves
-   authenticated, authorized, and audit-logged.
-
-### Step 6: Audit Logging Completeness & Immutability
-
-1. Verify that security-critical events (login, permission change, data
-   export, admin action) generate audit log records containing user ID,
-   timestamp, source IP, and action.
-2. Verify audit records are immutable or tamper-evident (append-only
-   storage, signed entries, or WORM export) and retained for the framework's
-   required window.
-3. Cross-check a sample of security events against the audit store to
-   measure completeness rather than trusting the instrumentation.
-
-### Step 7: Data Lifecycle, Retention & Erasure Hooks
-
-1. Audit data lifecycle management: verify the existence of data deletion
-   hooks (Right to be Forgotten / GDPR Art. 17) reachable for every
-   regulated store, including backups and derived analytics.
-2. Verify retention policy enforcement mechanisms actually execute
-   (scheduled jobs, lifecycle rules), not merely that a policy document
-   exists.
-3. Measure the erasure path end to end against the deletion SLA and flag
-   any store the erasure workflow cannot reach.
-
-### Step 8: Findings Register, Severity & Remediation Reporting
-
-1. Compile compliance gaps categorized by severity, framework control
-   reference, affected files, and remediation guidance into the findings
-   register.
-2. Assign every finding an owner and a remediation SLA proportional to its
-   severity.
-3. State explicitly what was not verified (runtime behavior, third-party
-   processor posture) so the report cannot be misread as certification.
-
----
-
-## 3. Reference Implementation: Regulated-Data Log Scanner & Findings Register
-
-```python
-#!/usr/bin/env python3
-"""Scan a checked-out repository for unredacted regulated-data logging.
-
-Read-only: this script never modifies scanned files. It emits a JSON list of
-candidate findings for human triage into the findings register, with every
-excerpt redacted before output.
-"""
-
-from __future__ import annotations
-
-import json
-import os
-import re
-import sys
-from dataclasses import dataclass, asdict
-
-LOG_CALL = re.compile(
-    r"\b(logger|console|log|print|trace)\s*\.\s*(debug|info|warn|error|fatal|log)\s*\(",
-    re.IGNORECASE,
-)
-PATTERNS = {
-    "email": re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
-    "us_ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    "card_candidate": re.compile(r"\b(?:\d[ -]*?){13,16}\b"),
-}
-REDACTION_HINT = re.compile(r"(redact|mask|scrub|sanitize|hash)\w*\s*\(", re.IGNORECASE)
-SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", ".venv"}
-TEXT_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rb", ".java", ".cs"}
-
-
-@dataclass
-class Finding:
-    rule_id: str
-    path: str
-    line: int
-    excerpt: str
-    severity: str
-    framework_refs: list[str]
-
-
-def iter_source_files(root: str):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for name in filenames:
-            if os.path.splitext(name)[1] in TEXT_EXTENSIONS:
-                yield os.path.join(dirpath, name)
-
-
-def mask(excerpt: str) -> str:
-    # Never copy raw regulated values into the evidence output.
-    excerpt = PATTERNS["email"].sub("<email>", excerpt)
-    excerpt = PATTERNS["us_ssn"].sub("<ssn>", excerpt)
-    excerpt = PATTERNS["card_candidate"].sub("<card-number>", excerpt)
-    return excerpt.strip()
-
-
-def scan(root: str) -> list[Finding]:
-    findings: list[Finding] = []
-    for path in iter_source_files(root):
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                lines = handle.readlines()
-        except OSError:
-            continue
-        for index, line in enumerate(lines, start=1):
-            if not LOG_CALL.search(line):
-                continue
-            if REDACTION_HINT.search(line):
-                continue  # field passes through a redaction helper first
-            for rule_id, pattern in PATTERNS.items():
-                if pattern.search(line):
-                    findings.append(Finding(
-                        rule_id=f"LOG-{rule_id.upper()}",
-                        path=os.path.relpath(path, root),
-                        line=index,
-                        excerpt=mask(line),
-                        severity="high",
-                        framework_refs=["SOC2-CC7.2", "GDPR-Art.5", "PCI-DSS-3.3"],
-                    ))
-    return findings
-
-
-def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
-    findings = scan(root)
-    print(json.dumps([asdict(f) for f in findings], indent=2))
-    return 1 if findings else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-The triaged findings register that the scanner output feeds into:
-
-```yaml
-# compliance/evidence/<audit-date>/findings-register.yaml
-audit:
-  frameworks: [gdpr, soc2, pci_dss]
-  scope: [billing-service, accounts-api]
-  auditor: agent
-  date: "<audit-date>"
-findings:
-  - id: F-001
-    rule_id: LOG-EMAIL
-    severity: high
-    status: open
-    framework_refs: ["GDPR Art. 5(1)(f)", "SOC 2 CC7.2"]
-    location: { file: src/billing/invoiceService.ts, line: 87 }
-    evidence: "logger.info('invoice issued for <email>')"
-    impact: "Customer email addresses are written to plaintext application logs."
-    remediation: "Route the customer identifier through the shared redact() helper or log the internal customer ID instead."
-    owner: billing-team
-    sla_days: 30
-  - id: F-002
-    rule_id: ENC-TLS-MIN
-    severity: medium
-    status: open
-    framework_refs: ["PCI-DSS 4.2.1", "HIPAA 164.312(e)(1)"]
-    location: { file: infra/terraform/alb.tf, line: 22 }
-    evidence: "ssl_policy pinned below the TLS 1.2 baseline"
-    impact: "Load balancer can negotiate TLS 1.1, below the minimum transport version."
-    remediation: "Pin the listener to a TLS 1.2+ policy and verify with a TLS handshake scan."
-    owner: platform-team
-    sla_days: 14
-```
-
----
-
-## 4. Redaction Regression Test & Audit-Log Completeness Pattern
-
-A redaction regression test that fails the build if regulated identifiers
-reach log output:
+An illustrative redaction regression test (pytest; the module is hypothetical).
+It inspects record attributes too, so values passed through `extra=` are caught:
 
 ```python
 import logging
@@ -349,143 +141,98 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 
 
-def test_log_records_exclude_regulated_identifiers(caplog):
-    from billing.invoice_service import issue_invoice  # module under audit
+def test_logs_exclude_regulated_identifiers(caplog):
+    from billing.invoice_service import issue_invoice  # hypothetical module
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         issue_invoice(customer_email="alice@example.com", ssn="123-45-6789")
 
-    rendered = "\n".join(record.getMessage() for record in caplog.records)
-    assert not EMAIL.search(rendered), "customer email leaked into log output"
-    assert not SSN.search(rendered), "customer SSN leaked into log output"
+    rendered = "\n".join(
+        f"{record.getMessage()} {vars(record)}" for record in caplog.records
+    )
+    assert not EMAIL.search(rendered), "email reached log output"
+    assert not SSN.search(rendered), "SSN reached log output"
 ```
 
-An audit-log completeness query run against a read-only replica; a non-zero
-result is a completeness gap, not a logging nit:
+An illustrative audit-log completeness query for a read-only replica (table
+names are hypothetical); a non-zero count is a completeness gap:
 
 ```sql
--- Every security-critical event in the last 24h must have an audit row
--- carrying actor, timestamp, and source IP.
-SELECT COUNT(*) AS missing_audit_rows
+SELECT COUNT(*) AS missing_or_incomplete
 FROM security_event e
-LEFT JOIN audit_log a
-  ON a.event_id = e.id
+LEFT JOIN audit_log a ON a.event_id = e.id
 WHERE e.occurred_at >= NOW() - INTERVAL '24 hours'
   AND (a.id IS NULL OR a.actor_id IS NULL OR a.source_ip IS NULL);
 ```
 
----
+An illustrative register entry:
 
-## 5. Compliance Invariants & Severity Mathematics
-
-Encryption minimums across every channel and store holding regulated data:
-
-$$\forall c \in \text{Channels}: \text{TLS}(c) \ge 1.2 \qquad \wedge \qquad \forall s \in \text{Stores}: \text{encryption}(s) \ge \text{AES-256}$$
-
-Audit-log completeness for security-critical events:
-
-$$\forall e \in \text{SecurityEvents}: \exists\, r \in \text{AuditLog}:\quad r \supseteq \{\text{actor\_id}, \text{action}, \text{timestamp}, \text{source\_ip}\} \wedge \text{immutable}(r)$$
-
-Data-subject erasure SLA (Right to be Forgotten):
-
-$$\forall u \in \text{ErasureRequests}:\quad t_{\text{deleted}}(u) - t_{\text{requested}}(u) \le 30 \text{ days}$$
-
-Severity taxonomy as a weighted score mapped to bands:
-
-$$\text{severity}(f) = \text{band}\big(w_e \cdot \text{exposure}(f) + w_s \cdot \text{sensitivity}(f) + w_x \cdot \text{exploitability}(f)\big),\quad \text{band} \in \{\text{critical}, \text{high}, \text{medium}, \text{low}\}$$
-
-Audit pass condition against the configured fail threshold:
-
-$$\text{audit-pass} \iff \#\{f : \text{severity}(f) \ge \text{fail\_on\_severity}\} = 0$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **No Legal Certification**: This skill performs code and configuration
-  auditing against framework controls; it does not issue legal compliance
-  certifications, attestations, or legal advice. Say so in every report.
-- **No Unauthorized Production Changes**: Do not modify production
-  authorization rules or audit log settings without authorization. The
-  audit observes and reports; remediation is a separate, approved change.
-- **Evidence Is Redacted**: Every excerpt captured into evidence files is
-  masked before it is written; raw regulated values never enter the report,
-  the scanner output, or the conversation transcript.
-- **Single-Agent Executable**: An optional compliance-auditor subagent can
-  analyze data flows in parallel, but one agent can complete this workflow
-  end to end.
-
-### Security Invariants
-
-- **Read-Only Against Production**: Live checks run against read replicas
-  and exported configuration only; never against production write paths,
-  and never with credentials beyond read scope.
-- **Evidence Access Control**: Findings registers and evidence directories
-  are stored with access controls proportionate to their sensitivity; they
-  describe vulnerabilities and must not become an attack map.
-- **No Weakening to Pass**: The fail threshold, severity bands, and
-  framework control mappings are never relaxed mid-audit to make a report
-  look green; gaps are reported, not hidden.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying files, the agent must capture a baseline list
-of modified and untracked files. If any verification command in Section 8
-fails and cannot be resolved within 2 iterations, the agent **must execute
-targeted rollback restricted ONLY to files created or modified during this
-run**:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-# (audit evidence files, scanner scripts, and reports from this run)
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
+```yaml
+- id: F-001
+  severity: high
+  confidence: high
+  controls: ["GDPR Art. 5(1)(c)", "GDPR Art. 32", "SOC 2 CC6 (map to org control)"]
+  location: src/billing/invoiceService.ts:87
+  evidence: "logger.info(`invoice issued for ${customer.email}`), no redact() call"
+  impact: Customer email addresses are written to plaintext application logs.
+  remediation: Log the internal customer ID, or pass the value through redact().
+  suggested_owner: billing team
 ```
 
-After executing targeted rollback, output the exact error trace and state
-failure causes. Never delete evidence, findings registers, or scan output
-produced by earlier audit runs; audit history is itself a compliance
-artifact.
+## Guardrails
 
----
+- State that the result is a readiness assessment, not certification,
+  attestation, or legal advice. Route legal interpretation to the user's
+  counsel or assessor.
+- Stay read-only. Do not change authorization rules, audit-log settings,
+  retention jobs, or production configuration; remediation is a separate,
+  approved change.
+- Revert or delete only files you created in this session, and say so. Never
+  discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions.
+  Query production data only through approved read-only replicas or exports,
+  with read-only credentials.
+- Redact every excerpt before it is written anywhere. Raw regulated values never
+  enter the report, evidence files, or the conversation.
+- Store evidence and registers where access is restricted; they describe gaps
+  and must not become an attack map. Do not commit them to a public location.
+- Never relax severity, scope, or control mappings mid-audit to make the result
+  look better, and never weaken a test or check.
+- Never invent control IDs, deadlines, or retention periods. Use the framework
+  text and the organization's policy, or mark the item unverified.
 
-## 8. Verification Plan & Audit Toolchain Commands
+## Verification
 
-Execute the following commands using project-local runners; adapt to the
-project's declared scripts and data platform:
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
-```bash
-# 1. Scan the checked-out tree for unredacted regulated-data logging
-python scripts/scan_regulated_logging.py . > compliance/evidence/pii-scan.json
+- Every finding was re-read at its `path:line`, and every control reference was
+  checked against the framework text or marked unverified.
+- Redaction and audit-logging tests, if the project has or adds them, ran
+  through the project's test runner with their results recorded.
+- Evidence files and the report were searched with the same regulated-data
+  patterns and contain no raw values.
+- Any live query ran against an approved read-only target, and its result is
+  recorded with the time it ran.
 
-# 2. Run redaction and audit-logging regression tests
-python -m pytest tests/security/ -v
+## Report
 
-# 3. Review transport and at-rest encryption configuration baselines
-grep -RInE "ssl_policy|min_tls_version|minimum_tls_version|encrypt" infra/ config/ || true
+- **Statement:** readiness assessment only; not certification or legal advice.
+- **Scope:** frameworks and versions, services, paths, data classes, exclusions.
+- **Regulated-data inventory:** fields mapped to entry points, stores, egress.
+- **Findings register:** by severity, with confidence, control references,
+  `path:line`, redacted evidence, impact, remediation, and suggested owner.
+- **Control coverage:** areas checked (logging, encryption, access, audit
+  logging, retention and erasure) and what each showed.
+- **Not verified:** runtime behavior, third-party processors, organizational
+  and physical controls, unverified control references, and stores not reached.
+- **Next actions:** remediation in priority order and evidence the auditor
+  will likely request.
 
-# 4. Run the audit-log completeness query against a read-only replica
-psql "$READ_ONLY_REPLICA_DSN" -v ON_ERROR_STOP=1 -f queries/audit_log_completeness.sql
-```
+## Optional delegation
 
----
-
-## 9. Completion Report
-
-Report the compliance frameworks assessed, the PII/PHI/PCI inventory mapped
-across entry points, stores, and egress, control findings by severity with
-framework control references and affected files, logging and encryption
-audit results, audit-log completeness measurements, data lifecycle and
-erasure coverage against the deletion SLA, prioritized remediation actions
-with owners and SLA windows, evidence locations, and an explicit statement
-of what was not verified and that the audit is not a legal certification.
+The `compliance-auditor` subagent can trace one framework or one service in
+parallel; the `security-reviewer` subagent can confirm whether a gap is also
+exploitable. Re-check any delegated finding at its `path:line` before
+reporting it. One agent can complete this workflow alone.

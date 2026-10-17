@@ -1,455 +1,247 @@
 ---
 name: dependency-audit
-description: "Audit project dependencies for vulnerabilities, staleness, license risk, unused packages, and version-policy compliance using manifests, lockfiles, and available scanning tools."
+description: "Audit a project's dependencies for known vulnerabilities, license risk, staleness, unused packages, and version-constraint problems using lockfiles and read-only scanners such as npm audit, pip-audit, osv-scanner, govulncheck, and cargo audit, then write a dependency-audit report. Use when asked to check dependencies, before a release, when an advisory lands, or when a customer asks for an SBOM. Audit only; not for performing upgrades (use the upgrade-dependencies skill)."
 ---
 
 # Dependency Audit
 
-Evaluate the security, freshness, license compliance, and structural health of
-a project's dependency tree across ecosystems. The default tooling covers
-**npm/yarn/pnpm** (`npm audit --json`), **Python** (`pip-audit --format json`),
-**Rust** (`cargo audit --json`), and **Ruby** (`bundler-audit check`), with all
-findings normalized into a single severity-ordered register.
+Find out what the project depends on, what is vulnerable, what is risky to
+ship, and what to do about it, without changing the dependency tree. The
+stance is **audit only, sourced findings**: scanners run in read-only or
+lockfile-only modes, raw output goes to a temporary directory, and every
+severity in the report names its source or says `unknown`.
 
-The skill is **audit-only by default**: it inspects manifests, lockfiles, and
-advisory feeds, then recommends. It never mutates the dependency tree without
-explicit approval. Before assuming a toolchain, inspect the repository to
-detect the package managers, registries, manifest formats, and any declared
-update or license policies actually in use.
+## When to use
 
----
+- A request to check dependencies for vulnerabilities, licenses, or health.
+- Before a release, after a new advisory, or when a dependency is added.
+- A customer or auditor asks for an SBOM or a dependency risk summary.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Performing upgrades or major-version migrations: use the
+  `upgrade-dependencies` skill.
+- Reviewing the project's own code for vulnerabilities: use the
+  `security-review` skill.
+- A leaked registry token or credential: use the `secret-leak-response` skill.
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Audit our npm and Python dependencies for
-   vulnerabilities and license problems"*), the agent **must automatically
-   infer and populate** `ecosystem_context`, `policy_context`, and
-   `scan_context` from the user's text and the repository's manifests.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover from the repository first; ask only about what remains ambiguous.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DependencyAuditContextManifest",
-  "type": "object",
-  "required": ["ecosystem_context", "scan_context"],
-  "properties": {
-    "ecosystem_context": {
-      "type": "object",
-      "required": ["package_manager", "manifests"],
-      "properties": {
-        "package_manager": { "type": "string", "enum": ["npm", "yarn", "pnpm", "pip", "poetry", "cargo", "bundler", "multi"] },
-        "manifests": {
-          "type": "array",
-          "items": { "type": "string", "pattern": "^(?!.*(?:^|/)\\.\\.?(?:/|$))[A-Za-z0-9/_.-]+$" },
-          "minItems": 1
-        },
-        "lockfiles": {
-          "type": "array",
-          "items": { "type": "string", "pattern": "^(?!.*(?:^|/)\\.\\.?(?:/|$))[A-Za-z0-9/_.-]+$" }
-        },
-        "registries": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "policy_context": {
-      "type": "object",
-      "required": ["license_policy"],
-      "properties": {
-        "license_policy": { "type": "string", "enum": ["permissive_only", "copyleft_allowed", "custom", "none"], "default": "none" },
-        "update_policy": { "type": "string", "enum": ["patch_only", "minor_allowed", "any", "none"], "default": "none" },
-        "max_critical": { "type": "integer", "minimum": 0, "default": 0 },
-        "max_high": { "type": "integer", "minimum": 0, "default": 0 },
-        "staleness_threshold_days": { "type": "integer", "minimum": 1, "default": 365 }
-      }
-    },
-    "scan_context": {
-      "type": "object",
-      "required": ["scope", "write_allowed"],
-      "properties": {
-        "scope": { "type": "string", "enum": ["production_only", "all_dependencies"], "default": "all_dependencies" },
-        "write_allowed": { "type": "boolean", "default": false },
-        "include_transitive": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
+- **Ecosystems:** every manifest and lockfile pair, including workspaces and
+  nested packages (`package.json` with `package-lock.json`, `pnpm-lock.yaml`,
+  or `yarn.lock`; `pyproject.toml` or `requirements*.txt` with `poetry.lock`
+  or `uv.lock`; `Cargo.lock`; `go.mod` and `go.sum`; `Gemfile.lock`; and so on).
+- **Policies:** license allowlists, update rules in `AGENTS.md`, Dependabot or
+  Renovate configuration, and any vulnerability gate (for example "no
+  unresolved critical or high in production dependencies").
+- **Distribution model:** hosted service, distributed binary, mobile app, or
+  published library. License obligations depend on it.
+- **Scope:** production only or all dependencies, and whether transitive
+  dependencies count.
+- **Tools available:** which scanners are installed. Do not install tools
+  without asking.
+- **Network and privacy:** most scanners send package names and versions to an
+  advisory service. Ask before running them if private package names are
+  sensitive.
+- **Where to save the report**, following the project's conventions.
+
+## Workflow
+
+1. **Inventory.** List each manifest and lockfile pair with lockfile presence
+   and age. A manifest without a lockfile, or a lockfile that no longer
+   satisfies its manifest, is a finding.
+2. **Choose scanners per ecosystem.** Prefer the project's own audit script.
+   Otherwise, as available:
+   - **Any ecosystem:** `osv-scanner` reads lockfiles across ecosystems without
+     installing anything. The command shape differs between major versions
+     (`osv-scanner scan source -r .` on v2, `osv-scanner -r .` on v1); check
+     `osv-scanner --help`.
+   - **npm, pnpm, Yarn:** `npm audit --json --package-lock-only`,
+     `pnpm audit --json`, `yarn audit --json` (Yarn 1), or
+     `yarn npm audit --all --recursive --json` (Yarn 2 and later).
+   - **Python:** `pip-audit --format json` audits the active environment.
+     For a fully pinned requirements file, add
+     `-r requirements.txt --no-deps --disable-pip` so it does not install
+     anything to resolve dependencies; confirm with `pip-audit --help`.
+   - **Go:** `govulncheck ./...` reports which vulnerabilities your code
+     actually calls (reachability), not just which modules are present.
+   - **Rust:** `cargo audit --json`, or `cargo deny check` if the project
+     configures it (it also covers licenses and banned crates).
+   - **Ruby:** `bundle-audit check --update`.
+   - **.NET:** `dotnet list package --vulnerable --include-transitive`.
+   - **SBOM:** `syft dir:. -o cyclonedx-json` or the ecosystem's CycloneDX
+     generator (for example `cyclonedx-npm`, `cyclonedx-py`, or
+     `cargo cyclonedx`). An SBOM can then be scanned with a tool such as
+     `grype`.
+3. **Run the scans with output outside the repository.** Record each command,
+   tool version, advisory database date, and exit code. Most scanners exit
+   non-zero when they find vulnerabilities; that is a result, not a tool
+   failure. Treat missing or unparseable output as a failed scan and say so.
+   Illustrative, for a POSIX shell (on Windows, create the directory under
+   `[System.IO.Path]::GetTempPath()` instead):
+
+   ```bash
+   # Run only the lines for ecosystems the project uses.
+   OUT="$(mktemp -d)"
+   npm audit --json --package-lock-only > "$OUT/npm-audit.json"
+   pip-audit --format json > "$OUT/pip-audit.json"   # in the project's virtualenv
+   osv-scanner scan source --format json -r . > "$OUT/osv.json"
+   govulncheck ./... > "$OUT/govulncheck.txt"
+   syft dir:. -o cyclonedx-json > "$OUT/sbom.cdx.json"
+   echo "scan output in $OUT"
+   ```
+4. **Normalize and source the severity.** Build one register with: ecosystem,
+   package, installed version (read from the lockfile, not the advisory's
+   affected range), advisory ID and aliases (CVE, GHSA, PYSEC, RUSTSEC, GO),
+   severity and its source, fixed versions, direct or transitive (with the
+   parent chain), production or development, reachability if known, and the
+   tool that reported it. Deduplicate across tools by alias.
+   - npm audit: take severity from the advisory objects in `via` and map
+     `moderate` to `medium`. String entries in `via` point to another
+     vulnerable package; do not count them twice.
+   - pip-audit JSON does not carry a reliable severity. Mark it `unknown`, or
+     look up the ID or alias in OSV (osv.dev) or the GitHub Advisory Database,
+     with approval for the network call, and record where it came from.
+   - The Go vulnerability database does not assign severity; mark `unknown` or
+     look up the CVE or GHSA alias. Keep govulncheck's called versus
+     not-called distinction.
+   - RustSec informational advisories (unmaintained, unsound, yanked) have no
+     severity; report them under staleness and maintenance.
+   - Where a CVSS base score exists, map it to bands: 0.1 to 3.9 `low`, 4.0 to
+     6.9 `medium`, 7.0 to 8.9 `high`, 9.0 to 10.0 `critical`.
+5. **Add context without rewriting severity.** Keep the advisory severity and
+   add a priority based on reachability, production use, and exposure. A
+   reachable `medium` in an internet-facing service can outrank an unreachable
+   `high` in a development tool; say why.
+6. **Analyze licenses.** Take licenses from the SBOM, package metadata, or a
+   configured tool (for example `cargo deny check licenses`). Compare with the
+   policy and distribution model:
+   - Strong copyleft (GPL, AGPL, which also applies to network use, and SSPL):
+     blocking or review, per policy.
+   - Weak copyleft (LGPL, MPL-2.0, EPL-2.0): review linking and modification
+     obligations.
+   - Permissive (MIT, BSD, Apache-2.0, ISC): usually clear; note attribution
+     and NOTICE obligations.
+   - Unknown, missing, custom, or conflicting declarations: review.
+
+   This is a risk summary, not legal advice; route decisions to the people who
+   own licensing.
+7. **Assess staleness and maintenance.** For direct dependencies at least:
+   current versus latest version, last release date, deprecation notices,
+   yanked versions, archived repositories, and single-maintainer or
+   unanswered-security-issue signals. Use the project's threshold; a mature
+   library with no recent release is a prompt to look, not automatically a
+   finding.
+8. **Find unused, duplicated, and loosely constrained dependencies.** If
+   installed, use tools such as `knip` or `depcheck` (JavaScript), `deptry`
+   (Python), or `cargo machete` (Rust), and `npm ls <package>` or
+   `cargo tree -d` for duplicates. Flag broad ranges (`*`, `latest`, open
+   `>=`), Git or URL dependencies without a pinned commit, and hard pins that
+   block security patches. Confirm each candidate by reading imports and build
+   configuration before reporting it.
+9. **Recommend.** For each vulnerable package: the fixed version, the upgrade
+   path (direct bump, parent bump, or an override such as npm `overrides`,
+   Yarn `resolutions`, or `pnpm.overrides`), whether it is a major-version
+   change, and a mitigation when no fix exists (disable the feature, constrain
+   input, or replace the package). Order by priority. Implementation goes to
+   the `upgrade-dependencies` skill once the user approves.
+10. **Write the report** using the headings in Report. Save it where the
+    project keeps such documents (for example
+    `docs/security/dependency-audit-YYYY-MM-DD.md`), or return it in the
+    conversation if the user does not want a file. Leave raw scan output in
+    the temporary directory unless the user asks to keep it.
+
+## Worked example: normalized findings
+
+Illustrative rows with placeholder packages and advisory IDs.
+
+```markdown
+| Severity (source)          | Package         | Eco.  | Installed | Fixed  | Advisory            | Path                      | Reachable        | Remediation                                      |
+|----------------------------|-----------------|-------|-----------|--------|---------------------|---------------------------|------------------|--------------------------------------------------|
+| high (GHSA)                | example-parser  | npm   | 2.3.1     | 2.3.4  | GHSA-xxxx-xxxx-xxxx | via build-tool 5.1.0, dev | n/a (build only) | Bump build-tool to a release using 2.3.4         |
+| unknown (pip-audit, OSV    | example-http    | PyPI  | 1.8.0     | 1.8.2  | PYSEC-XXXX-NN       | direct, production        | unknown          | Pin 1.8.2 after reading its changelog            |
+| lookup not approved)       |                 |       |           |        |                     |                           |                  |                                                  |
+| medium (CVE alias, NVD)    | example-yaml    | Go    | v0.9.0    | v0.9.3 | GO-XXXX-NNNN        | direct, production        | called           | Bump; priority raised because the code calls it  |
+| none (RustSec unmaintained)| example-tls-sys | Rust  | 0.4.2     | none   | RUSTSEC-XXXX-NNNN   | via http-stack 1.2        | n/a              | Track the parent's migration; plan a replacement |
 ```
 
-### Automatic Natural Language Inference & Path Traversal Validation Rules
+## Guardrails
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+- Audit only. Never install, upgrade, remove, or deduplicate dependencies, and
+  never regenerate a lockfile, without explicit approval.
+- Never run package install scripts during an audit (`npm install`,
+  `pip install`, `bundle install`, or building source distributions). Prefer
+  lockfile-only modes. If a scanner can only resolve by installing, ask first,
+  and use a throwaway environment with scripts disabled (for example
+  `--ignore-scripts`).
+- Write scan output to a temporary directory outside the repository. The only
+  file written in the repository is the report, where the user wants it.
+- Revert or delete only files you created in this session, and say so. Never
+  discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions,
+  including sending private package names to external services.
+- Never weaken a test, check, or policy threshold to make the audit pass, and
+  never assign a severity you could not source.
+- Treat registry tokens and advisory-service credentials as secrets: refer to
+  them by environment variable name and keep them out of reports and logs.
 
-- **`package_manager`**: Detected from manifests present in the repository
-  (`package.json` maps to npm/yarn/pnpm, `requirements.txt` or
-  `pyproject.toml` maps to pip/poetry, `Cargo.toml` maps to cargo, `Gemfile`
-  maps to bundler). Multiple ecosystems yield `multi`.
-- **`manifests` / `lockfiles`**: Enumerated by globbing the repository root
-  and workspace subdirectories. Every path MUST remain confined to the
-  repository: reject any manifest path containing traversal segments (`.` or
-  `..`) and **ABORT execution immediately** if one is detected.
-- **`policy_context`**: Read from the repository's declared policy sources
-  (license allowlists, `AGENTS.md` dependency rules, dependabot or renovate
-  configuration). Defaults to `license_policy: "none"` and
-  `update_policy: "none"` when undeclared; record the absence as a finding.
-- **`scan_context.write_allowed`**: Always `false` unless the user explicitly
-  authorizes modifications in the prompt. Auditing never implies write access.
-- **`scope`**: `all_dependencies` unless the user restricts the audit to
-  production dependencies only.
+## Verification
 
----
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
-## 2. Deterministic State Machine Execution Flow
+- `git status --porcelain` shows no changes to manifests or lockfiles and no
+  new files in the repository other than the report.
+- Each finding's installed version comes from the lockfile and falls inside
+  the advisory's affected range.
+- Each severity names its source or is `unknown`.
+- Finding counts reconcile with the raw scanner output after deduplication.
+- Each scan's command, tool version, database date, and exit code is recorded,
+  and failed or skipped scans are listed.
 
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
+## Report
 
-### Step 1: Context Ingestion & Ecosystem Discovery
+Return the report path, the top-priority actions, and what was not covered
+(ecosystems without a scanner, skipped scans, unapproved lookups).
 
-1. Read `AGENTS.md`, dependency manifests, lockfiles, version constraints, and
-   any declared update or license policy.
-2. Identify the package managers and registries in use, including private
-   registries and mirrored advisory feeds.
-3. Enumerate every manifest/lockfile pair; record lockfile presence, format
-   version, and age. A manifest without a lockfile is itself a finding.
+<!-- handoff: dependency-audit-report -->
+```markdown
+# Dependency audit report: <project>
 
-### Step 2: Vulnerability Scanning with Recorded Commands
+## Scope
+Ecosystems, manifests and lockfiles, production or all dependencies, tools
+with versions and database dates, and the date of the audit.
 
-1. Scan for known vulnerabilities using the project's declared audit command
-   or standard tooling: `npm audit --json`, `pip-audit --format json`,
-   `cargo audit --json`, `bundler-audit check`, or the ecosystem equivalent.
-2. Record the exact commands executed, tool versions, advisory database
-   timestamps, and raw output locations so the scan is reproducible.
-3. Never execute install-time scripts as part of scanning; prefer
-   lockfile-only analysis (`npm audit --package-lock-only` style) wherever the
-   toolchain supports it.
+## Inventory summary
+| Ecosystem | Lockfile | Direct | Transitive | Lockfile in sync |
 
-### Step 3: Maintenance & Staleness Assessment
+## Vulnerability findings
+| Severity (source) | Package | Installed | Fixed | Advisory | Path | Reachable | Priority |
 
-1. Assess each dependency's maintenance status: last release date, open
-   security advisories, deprecation notices, and bus-factor signals (single
-   maintainer, archived repository, unanswered security issues).
-2. Compute staleness per package against `staleness_threshold_days` and
-   classify each as fresh, aging, stale, or abandoned.
+## License analysis
+| Package | License | Policy result | Notes |
 
-### Step 4: License Compatibility Review
+## Staleness and maintenance
+| Package | Current | Latest | Last release | Signal |
 
-1. Extract the declared license of every direct and transitive dependency
-   from manifest metadata and license files.
-2. Check compatibility against the project's distribution model (proprietary
-   SaaS, distributed binary, published open source) and the declared license
-   policy. Flag copyleft (GPL, AGPL, SSPL), weak-copyleft in doubt (LGPL,
-   MPL), unknown, or missing licenses.
+## Recommendations
+Prioritized actions, each marked patch, minor, or major, with mitigations
+where no fix exists. Unused and loosely constrained dependencies.
 
-### Step 5: Usage & Weight Analysis
-
-1. Identify unused, duplicated, or unnecessarily heavy dependencies by
-   cross-referencing static imports, build configuration, and bundler or
-   installer output.
-2. Mark removal candidates as recommendations only; never remove a package
-   without explicit approval.
-
-### Step 6: Version Constraint Evaluation
-
-1. Evaluate constraint ranges: overly broad ranges (`*`, `>=x`) that risk
-   uncontrolled breakage, and hard pins that silently block security patches.
-2. Check lockfile freshness: a lockfile older than its manifest, or resolved
-   versions that have drifted from declared ranges, is a finding.
-
-### Step 7: Remediation Recommendation
-
-1. Recommend updates with a compatibility and risk assessment for each:
-   distinguish safe patch updates (semver-compatible, no API change) from
-   breaking major-version upgrades that require code changes.
-2. For each vulnerable package, state the fixed version, the upgrade path
-   (direct bump versus parent-dependency override), and a fallback mitigation
-   (feature disable, network control, replacement candidate) when no fix
-   exists.
-
-### Step 8: Findings Report & Handoff
-
-1. Report findings with severity, evidence, affected packages, remediation
-   direction, and follow-up actions.
-2. Populate the `templates/handoffs/dependency-audit-report.md` handoff
-   artifact with the normalized findings register and policy evaluation.
-3. Record scan limitations explicitly: ecosystems not covered, advisory
-   databases not consulted, and any packages skipped.
-
----
-
-## 3. Reference Implementation: Multi-Ecosystem Audit Aggregation Script
-
-```python
-#!/usr/bin/env python3
-"""Normalize ecosystem audit output into a single findings register."""
-from __future__ import annotations
-
-import json
-import subprocess
-import sys
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-
-SEVERITY_ORDER = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "info": 0}
-
-@dataclass
-class Finding:
-    package: str
-    ecosystem: str
-    installed_version: str
-    severity: str
-    advisory_id: str
-    title: str
-    fixed_version: str | None
-    direct: bool
-    remediation: str
-
-def run_json_command(command: list[str]) -> dict:
-    """Run a read-only audit command; never triggers install scripts."""
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    # Most audit tools exit 1 when findings exist; anything else is a failure.
-    if result.returncode not in (0, 1):
-        raise RuntimeError(f"audit command failed: {' '.join(command)}\n{result.stderr}")
-    return json.loads(result.stdout or "{}")
-
-def parse_npm_audit(audit_json: dict) -> list[Finding]:
-    findings: list[Finding] = []
-    for name, entry in audit_json.get("vulnerabilities", {}).items():
-        advisories = [v for v in entry.get("via", []) if isinstance(v, dict)]
-        fix = entry.get("fixAvailable")
-        fixed_version = fix.get("version") if isinstance(fix, dict) else None
-        for advisory in advisories or [{}]:
-            findings.append(Finding(
-                package=name,
-                ecosystem="npm",
-                installed_version=entry.get("range", "unknown"),
-                severity=entry.get("severity", "info"),
-                advisory_id=str(advisory.get("source", "npm-advisory")),
-                title=advisory.get("title", "unspecified advisory"),
-                fixed_version=fixed_version,
-                direct=bool(entry.get("isDirect", False)),
-                remediation=(f"npm update {name}" if fix else
-                             "no fix published; override parent or mitigate"),
-            ))
-    return findings
-
-def parse_pip_audit(audit_json: dict) -> list[Finding]:
-    findings: list[Finding] = []
-    for dep in audit_json.get("dependencies", []):
-        for vuln in dep.get("vulns", []):
-            fix_versions = vuln.get("fix_versions") or []
-            findings.append(Finding(
-                package=dep["name"],
-                ecosystem="pip",
-                installed_version=dep["version"],
-                severity="high" if not fix_versions else "moderate",
-                advisory_id=vuln.get("id", "unknown"),
-                title=(vuln.get("description") or "")[:120],
-                fixed_version=fix_versions[0] if fix_versions else None,
-                direct=True,
-                remediation=(f"pip install {dep['name']}=={fix_versions[0]}"
-                             if fix_versions else
-                             "no fix published; mitigate or replace"),
-            ))
-    return findings
-
-def policy_gate(findings: list[Finding], max_critical: int = 0,
-                max_high: int = 0) -> bool:
-    critical = sum(1 for f in findings if f.severity == "critical")
-    high = sum(1 for f in findings if f.severity == "high")
-    return critical <= max_critical and high <= max_high
-
-def main() -> int:
-    register: list[Finding] = []
-    register.extend(parse_npm_audit(run_json_command(
-        ["npm", "audit", "--json", "--package-lock-only"])))
-    register.extend(parse_pip_audit(run_json_command(
-        ["pip-audit", "--format", "json"])))
-    register.sort(key=lambda f: -SEVERITY_ORDER.get(f.severity, 0))
-    report = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "finding_count": len(register),
-        "findings": [asdict(f) for f in register],
-    }
-    print(json.dumps(report, indent=2))
-    return 0 if policy_gate(register) else 1
-
-if __name__ == "__main__":
-    sys.exit(main())
+## Handoff
+**Changed contract:** None; the audit changed no dependencies.
+**Files / systems affected:** Manifests and lockfiles that the recommendations would change.
+**Evidence and tests:** Scan commands, tool versions, database dates, exit codes.
+**Risks / rollback:** Breaking-change risk of each recommended upgrade.
+**What the next agent needs:** Approved upgrades for the upgrade-dependencies skill, plus blockers.
 ```
 
-### Example Normalized Findings Table
+## Optional delegation
 
-| Severity | Package     | Ecosystem | Installed | Fixed In | Advisory       | Direct | Remediation                            |
-|----------|-------------|-----------|-----------|----------|----------------|--------|----------------------------------------|
-| critical | lodash      | npm       | 4.17.20   | 4.17.21  | GHSA-xxxx-0001 | yes    | `npm update lodash`                    |
-| high     | requests    | pip       | 2.28.0    | 2.31.0   | PYSEC-2023-74  | yes    | `pip install requests==2.31.0`         |
-| high     | openssl-sys | cargo     | 0.9.80    | 0.9.92   | RUSTSEC-0000-0 | no     | bump parent crate and refresh lockfile |
-| moderate | rack        | bundler   | 2.2.3     | 2.2.8    | CVE-0000-00000 | yes    | `bundle update rack`                   |
-
----
-
-## 4. Reproducible Re-Scan & Severity Classification Verification Pattern
-
-An audit is only trustworthy if a second run over unchanged inputs reproduces
-it. Re-run the recorded commands and diff the normalized registers; classify
-every finding through a single deterministic severity function so policy gates
-are stable across runs.
-
-```bash
-# 1. Re-run the identical recorded audit commands into fresh output files
-npm audit --json --package-lock-only > audit-rerun-npm.json
-pip-audit --format json > audit-rerun-pip.json
-
-# 2. Regenerate the normalized register from the re-run output
-python aggregate_audit.py > register-rerun.json
-
-# 3. Deterministic comparison: unchanged inputs must yield identical findings
-diff \
-  <(jq -S '.findings | sort_by(.package, .advisory_id)' register-run1.json) \
-  <(jq -S '.findings | sort_by(.package, .advisory_id)' register-rerun.json) \
-  && echo "REPRODUCIBLE: registers identical" \
-  || echo "DRIFT DETECTED: investigate advisory feed or lockfile changes"
-
-# 4. Confirm the audit-only invariant: no manifest or lockfile was modified
-git status --porcelain -- 'package*.json' 'requirements*.txt' 'Cargo.*' 'Gemfile*'
-```
-
-```python
-def classify_cvss(score: float) -> str:
-    """Map a CVSS v3 base score to the register's severity bands."""
-    if score <= 0.0:
-        return "none"
-    if score < 4.0:
-        return "low"
-    if score < 7.0:
-        return "moderate"
-    if score < 9.0:
-        return "high"
-    return "critical"
-
-def policy_gate_verdict(findings: list, max_critical: int = 0,
-                        max_high: int = 0) -> str:
-    critical = sum(1 for f in findings if f.severity == "critical")
-    high = sum(1 for f in findings if f.severity == "high")
-    if critical > max_critical:
-        return f"FAIL: {critical} critical findings exceed policy max {max_critical}"
-    if high > max_high:
-        return f"FAIL: {high} high findings exceed policy max {max_high}"
-    return "PASS: within declared vulnerability policy thresholds"
-```
-
----
-
-## 5. CVSS Severity Bands & Policy Invariant Mathematics
-
-$$\text{severity}(s) = \begin{cases} \text{critical} & 9.0 \le s \le 10.0 \\ \text{high} & 7.0 \le s < 9.0 \\ \text{moderate} & 4.0 \le s < 7.0 \\ \text{low} & 0.1 \le s < 4.0 \\ \text{none} & s = 0.0 \end{cases}$$
-
-$$\#\{f \in F : \text{severity}(f) = \text{critical}\} \le N_{\text{critical}}^{\max} = 0, \qquad \#\{f \in F : \text{severity}(f) = \text{high}\} \le N_{\text{high}}^{\max}$$
-
-$$\text{staleness}(p) = t_{\text{now}} - t_{\text{last\_release}}(p), \qquad \text{staleness}(p) > \theta_{\text{stale}} = 365\,\text{days} \Rightarrow \text{flag}(p)$$
-
-$$\text{license\_risk}(\ell) = \begin{cases} \text{blocking} & \ell \in \{\text{GPL}, \text{AGPL}, \text{SSPL}\} \wedge \text{artifact is distributed} \\ \text{review} & \ell \in \{\text{LGPL}, \text{MPL}, \text{unknown}, \text{missing}\} \\ \text{clear} & \ell \in \{\text{MIT}, \text{BSD-2/3}, \text{Apache-2.0}, \text{ISC}\} \end{cases}$$
-
-$$\forall\, \text{run } r: \quad \text{write\_allowed}(r) = \text{false} \;\Rightarrow\; \text{manifests}(r_{\text{before}}) = \text{manifests}(r_{\text{after}}) \;\wedge\; \text{lockfiles}(r_{\text{before}}) = \text{lockfiles}(r_{\text{after}})$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **Audit-Only by Default**: Do **NOT** install, upgrade, or remove
-  dependencies without explicit approval. This skill audits and recommends;
-  it does not modify manifests by default. Any approved change is executed as
-  a separate, separately verified run.
-- **Read-Only Scanning**: Prefer lockfile-only analysis modes. Record every
-  command executed, its tool version, and its raw output location so the
-  audit is reproducible by another operator.
-- **Single-Agent Executable**: An optional dependency-auditor subagent can
-  analyze manifests and advisories in parallel, but one agent can complete
-  this workflow end to end.
-
-### Security Invariants
-
-- **No Untrusted Install Scripts**: Never run untrusted post-install scripts
-  from unknown packages as part of an audit; use script-suppressed or
-  lockfile-only resolution (`--ignore-scripts`, `--package-lock-only`).
-- **No Uncontrolled Data Egress**: Never transmit manifests, lockfiles, or
-  findings to external services without approval; private package names leak
-  internal system topology.
-- **Credential Hygiene**: Treat advisory database credentials and private
-  registry tokens as secrets. Reference them by environment variable name
-  only, and keep them out of reports, registers, and command logs.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying any file (reports, registers, scratch output),
-capture a baseline list of modified and untracked files. If any verification
-command in Section 8 fails and cannot be resolved within 2 iterations,
-execute targeted rollback restricted ONLY to files created or modified during
-this run:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
-After executing targeted rollback, output the exact error trace and state
-failure causes. For an audit-only run, manifests and lockfiles must never
-appear in `MODIFIED_FILES`; if they do, the run has violated its guardrails —
-revert them first and disclose the violation in the completion report.
-
----
-
-## 8. Verification Plan & Multi-Ecosystem Audit Toolchain Commands
-
-Execute the following commands using project-local runners; skip ecosystems
-not present in the repository and record each skip:
-
-```bash
-# 1. npm ecosystem scan (lockfile-only; no script execution)
-npm audit --json --package-lock-only > audit-npm.json
-
-# 2. Python ecosystem scan
-pip-audit --format json > audit-pip.json
-
-# 3. Rust ecosystem scan
-cargo audit --json > audit-cargo.json
-
-# 4. Ruby ecosystem scan
-bundler-audit check --format json > audit-bundler.json
-
-# 5. Aggregate all ecosystem output into the normalized findings register
-python aggregate_audit.py > findings-register.json
-
-# 6. Confirm the audit-only invariant: manifests and lockfiles untouched
-git status --porcelain -- 'package*.json' 'requirements*.txt' 'Cargo.*' 'Gemfile*'
-```
-
----
-
-## 9. Completion Report
-
-Report packages audited per ecosystem with exact scan commands and tool
-versions, vulnerabilities found with severity and CVSS evidence, license
-issues with policy classification, staleness concerns with age data, unused
-or duplicated dependencies with cross-reference evidence, recommended actions
-ranked by risk and split into safe patch updates versus breaking upgrades,
-policy gate results against the declared max critical/high thresholds, and
-the explicit limitations of the scan (uncovered ecosystems, advisory feed
-timestamps, skipped packages).
+The `dependency-auditor` subagent can scan one ecosystem or workspace in
+parallel; the `security-reviewer` subagent can judge whether a vulnerable code
+path is reachable when no tool can tell. Re-check delegated findings against
+the lockfile before reporting them. One agent can complete this workflow alone.

@@ -1,270 +1,267 @@
 ---
 name: cryptographic-protocol-implementation
-description: Implement modern authenticated encryption, secure key exchange, mTLS, and post-quantum cryptographic primitives.
+description: "Implement or review application cryptography with vetted high-level libraries, covering authenticated encryption with key IDs for rotation, nonce strategy, signatures, key derivation, password hashing, TLS and mTLS configuration, and hybrid post-quantum key exchange. Use when code must encrypt, sign, derive keys, hash passwords, or configure TLS, or when existing crypto code needs checking for misuse. Not for a general security review (use the security-review skill) or a leaked key (use the secret-leak-response skill)."
 ---
 
 # Cryptographic Protocol Implementation
 
-Implement modern, constant-time cryptographic protocols including Authenticated Encryption with Associated Data (AEAD: ChaCha20-Poly1305, AES-256-GCM), secure key exchange (X25519, Ephemeral ECDH), digital signatures (Ed25519), Mutual TLS (mTLS 1.3), key derivation (HKDF, Argon2id), and Post-Quantum Cryptography (PQC: ML-KEM / Kyber-768).
+Protect data with constructions that experts have already built and tested.
+The stance is **library first**: choose the highest-level vetted API that
+fits, design the ciphertext format for key rotation from day one, and prove
+the result with published test vectors. Hand-assemble primitives only when no
+vetted construction fits, and then follow a published specification exactly.
 
-The skill is **constant-time and contract-first**: cipher suites, key entropy, nonce uniqueness, MAC tag verification, and secret memory zeroization are enforced before writing implementation code.
+## When to use
 
----
+- Encrypting fields, tokens, files, or backups in application code.
+- Signing or verifying messages, webhooks, or tokens; deriving keys; storing
+  passwords.
+- Configuring TLS or mTLS for services and clients, or planning a
+  post-quantum migration.
+- Reviewing existing cryptographic code for misuse.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- A broad security review of a change: use the `security-review` skill.
+- Deciding which threats need cryptographic controls: use the
+  `threat-modeling` skill.
+- A key or secret has leaked: use the `secret-leak-response` skill.
+- Mapping encryption to compliance controls: use the `compliance-audit` skill.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Implement ChaCha20-Poly1305 authenticated encryption with HKDF key derivation for sensitive payload storage"*), the agent **must automatically infer and populate** `primitive_type`, `cipher_suite`, `secret_management`, and `compliance_standard` from the user's text and target programming language.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover from the repository first; ask only about what remains ambiguous.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "CryptoProtocolContextManifest",
-  "type": "object",
-  "required": ["protocol_spec", "security_context"],
-  "properties": {
-    "protocol_spec": {
-      "type": "object",
-      "required": ["primitive_type", "cipher_suite"],
-      "properties": {
-        "primitive_type": { 
-          "type": "string", 
-          "enum": ["aead_encryption", "key_exchange", "digital_signature", "mtls_transport", "key_derivation", "pqc_hybrid"] 
-        },
-        "cipher_suite": { 
-          "type": "string", 
-          "enum": ["chacha20_poly1305", "aes_256_gcm", "x25519_hkdf", "ed25519", "argon2id", "ml_kem_768"] 
-        },
-        "key_size_bits": { "type": "integer", "default": 256 },
-        "nonce_size_bytes": { "type": "integer", "default": 12 }
-      }
-    },
-    "security_context": {
-      "type": "object",
-      "required": ["csprng_source", "zeroize_on_free"],
-      "properties": {
-        "csprng_source": { "type": "string", "enum": ["web_crypto", "sys_urandom", "ring_crypto", "openssl_3"] },
-        "zeroize_on_free": { "type": "boolean", "default": true },
-        "constant_time_required": { "type": "boolean", "default": true }
-      }
-    },
-    "compliance_standard": {
-      "type": "object",
-      "properties": {
-        "standard": { "type": "string", "enum": ["rfc_8439", "fips_140_3", "cnsa_2_0", "nist_pqc"] }
-      }
-    }
-  }
-}
-```
+- **Runtime and libraries:** language, framework, and the crypto libraries
+  already in the manifests. Prefer a vetted library the project already uses.
+- **What is protected:** the data, the attacker, and how long confidentiality
+  must last (long-lived secrets raise the post-quantum priority).
+- **Key management:** KMS, HSM, or secret manager; who can use keys; the
+  rotation policy.
+- **Interoperability:** existing ciphertext formats, other services or
+  languages that must read the data, and protocol specifications to follow.
+- **Constraints:** whether FIPS 140-3 validated modules are required (then use
+  only the module's approved algorithms; XChaCha20-Poly1305 and Argon2id are
+  not FIPS-approved), and expected message volume and size per key.
 
-### Automatic Natural Language Inference & Weak Cipher Rejection
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and strict rejection checks:
+1. **Choose the construction.** Pick the highest-level option that fits:
+   - Encrypting records or fields: libsodium
+     `crypto_aead_xchacha20poly1305_ietf_encrypt` or `crypto_secretbox_easy`
+     (PyNaCl `SecretBox`), a Google Tink AEAD keyset, or cloud KMS envelope
+     encryption (a data key per object, wrapped by a KMS key).
+   - Files, backups, and streams: age, libsodium `crypto_secretstream`, or
+     Tink streaming AEAD.
+   - Encrypting to a recipient's public key: libsodium sealed boxes, Tink
+     hybrid encryption (HPKE), or age recipients.
+   - Signatures: Ed25519, or ECDSA P-256 where interoperability or the
+     validated module requires it.
+   - Message authentication: HMAC-SHA-256.
+   - Subkeys from a high-entropy secret: HKDF-SHA-256 (RFC 5869) with a
+     distinct `info` label per purpose.
+   - Passwords: Argon2id (step 5). Secure channels: TLS (step 6). Never design
+     a handshake; if TLS does not fit, use a vetted Noise protocol library.
+2. **Design the envelope for rotation.** Every ciphertext carries a format
+   version, a key ID, the nonce, and the ciphertext with its tag. Authenticate
+   the version, key ID, and context (table, column, record ID, tenant) as
+   associated data so a ciphertext cannot be moved or relabeled. Decryption
+   picks the key by ID and fails on unknown IDs. Rotation adds a new key, sends
+   new writes to it, keeps old keys decrypt-only, re-encrypts in the background,
+   and retires old keys only when no ciphertext or backup still needs them.
+   Tink keysets and KMS envelope formats provide this for you.
+3. **Get nonces right.** Never reuse a nonce under the same key: with AES-GCM
+   or ChaCha20-Poly1305, reuse reveals the XOR of the plaintexts and enables
+   forgeries.
+   - With random 96-bit nonces (AES-GCM, ChaCha20-Poly1305), do not exceed
+     roughly 2^32 messages per key (the NIST SP 800-38D bound for random IVs).
+     Count usage or rotate well before that.
+   - Prefer XChaCha20-Poly1305, whose 192-bit nonce makes random nonces safe
+     at any realistic volume, or counter nonces whose state can never repeat
+     across restarts, replicas, or restored snapshots. AES-GCM-SIV limits the
+     damage of accidental reuse where it is available.
+   - Generate nonces and keys from the OS CSPRNG (`crypto.randomBytes` or
+     `crypto.getRandomValues`, Python `secrets`, Go `crypto/rand`, Rust
+     `getrandom`). Never use `Math.random`, `random`, or timestamps.
+4. **Authenticate before use.** No plaintext is used until tag verification
+   succeeds. APIs that emit plaintext before the final check (for example Node
+   `decipher.update`) must buffer until `final()` succeeds, or use a chunked
+   construction such as secretstream or age. Return one generic error for
+   every failure. Compare MACs and tokens in constant time
+   (`crypto.timingSafeEqual` on equal-length buffers, Python
+   `hmac.compare_digest`, Go `subtle.ConstantTimeCompare`).
+5. **Hash passwords with Argon2id** through a maintained library that stores
+   the salt and parameters in the encoded hash. Use at least the OWASP Password
+   Storage Cheat Sheet minimum (for example m=19 MiB, t=2, p=1) or an RFC 9106
+   recommendation (t=1, p=4, m=2 GiB, or t=3, p=4, m=64 MiB when memory is
+   constrained), then tune upward within the login latency budget. Verify with
+   the library's verify function and re-hash on login when parameters change.
+   Where FIPS rules out Argon2id, use PBKDF2-HMAC-SHA-256 with the cheat
+   sheet's current iteration guidance. bcrypt ignores input past 72 bytes.
+6. **Configure TLS and mTLS.**
+   - TLS 1.3 by default. Allow TLS 1.2 only for clients that need it, with
+     ECDHE key exchange and AEAD suites. Disable SSL 3.0, TLS 1.0, and TLS 1.1.
+   - Keep certificate and hostname verification on in every client. Flag
+     `InsecureSkipVerify: true`, `verify=False`, `rejectUnauthorized: false`,
+     and `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+   - For mTLS, require and verify client certificates against a dedicated CA,
+     then authorize on the certificate identity (a SAN or SPIFFE ID), not on
+     chain validity alone. Use short-lived certificates with automated renewal.
+   - Certificate pinning is usually discouraged because rotations and CA
+     changes cause outages. Consider it only for clients you control end to
+     end (your own mobile app or agents): pin a CA or intermediate public key,
+     ship backup pins, and keep a way to update pins remotely.
 
-- **Deprecated / Weak Cipher Rejection**: If prompt requests `RC4`, `3DES`, `MD5`, `SHA-1`, `ECB_mode`, `RSA-1024`, or plain `Diffie-Hellman`, **ABORT execution immediately** and reject with `WEAK_CIPHER_FORBIDDEN`.
-- **`primitive_type`**: Inferred from requirement ("encrypt payload" $\rightarrow$ `aead_encryption`, "secure channel" $\rightarrow$ `mtls_transport`, "hash password" $\rightarrow$ `key_derivation`).
-- **`cipher_suite`**: Defaults to `chacha20_poly1305` or `aes_256_gcm` for symmetric AEAD; `x25519_hkdf` for key exchange; `argon2id` for password hashing.
-- **`csprng_source`**: Uses the target language's native cryptographically secure random number generator (`crypto.getRandomValues()` in JS/TS, `crypto/rand` in Go, `getrandom` / `ring` in Rust).
+   ```go
+   // Illustrative mTLS server configuration (Go crypto/tls).
+   cfg := &tls.Config{
+       MinVersion: tls.VersionTLS13,
+       ClientAuth: tls.RequireAndVerifyClientCert,
+       ClientCAs:  clientCAPool, // *x509.CertPool holding only the client-issuing CA
+   }
+   ```
+7. **Plan for post-quantum.** For data that must stay confidential for many
+   years ("harvest now, decrypt later"), enable hybrid key exchange such as
+   X25519MLKEM768 through the TLS library. Recent Go releases, OpenSSL 3.5 and
+   later, BoringSSL-based stacks, and major browsers support it, some by
+   default; check the release notes for your version. Hybrid stays secure if
+   either component holds. Never hand-roll ML-KEM (FIPS 203) or ML-DSA
+   (FIPS 204); use your library's supported API when it exists.
+8. **Handle keys carefully.** Load keys from the KMS or secret manager, never
+   from source code, and never log them. Use separate keys per purpose. Zeroize
+   key buffers where the language supports it (`sodium_memzero`, the Rust
+   `zeroize` crate). In garbage-collected runtimes (JavaScript, Python, Go,
+   Java), zeroization is best effort because the runtime may have copied the
+   buffer and strings are immutable; keep keys in byte buffers, and prefer KMS
+   or HSM operations so raw keys never enter the process.
+9. **Retire weak algorithms.** No ECB, no unauthenticated CBC or CTR, no MD5 or
+   SHA-1 where collision resistance matters (signatures, certificates,
+   integrity of untrusted data), no RSA keys below 2048 bits, no fast hashes
+   for passwords. SHA-1 can be justified for interoperability where collision
+   resistance is not relied on, such as HMAC-SHA1 in HOTP and TOTP (RFC 4226,
+   RFC 6238). Record each exception and its reason. When a weak algorithm is
+   requested, explain the risk and propose a replacement; if interoperability
+   truly requires it, isolate it behind a narrow function and plan the migration.
 
----
+## Reference: ChaCha20-Poly1305 envelope with a key ID (TypeScript, Node)
 
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Context Ingestion & Cipher Suite Approval
-
-1. Inspect `package.json`, `Cargo.toml`, `go.mod`, or Python dependencies.
-2. Confirm libraries use audited, constant-time cryptographic primitives (Web Crypto API, `libsodium`, `ring` in Rust, `crypto/cipher` in Go, `cryptography` in Python).
-3. Ensure no custom or unvetted cryptographic algorithms are created ("Never write your own crypto").
-
-### Step 2: Key Derivation & CSPRNG Initialization
-
-1. Use HKDF (`RFC 5869`) with SHA-256 / SHA-512 to derive sub-keys from master secrets or shared Diffie-Hellman secrets.
-2. For password storage or password-based key derivation, enforce **Argon2id** ($m=65536 \text{ KB}, t=3, p=4$).
-3. Generate nonces / IVs using CSPRNG sources only.
-
-### Step 3: AEAD Authenticated Encryption Implementation
-
-1. **Unique Nonce Guarantee**: For every encryption operation, generate a fresh, random 96-bit (12-byte) nonce. **NEVER reuse a nonce under the same key**.
-2. **Associated Data (AAD) Integration**: Bind contextual metadata (user IDs, timestamps, protocol headers) as Associated Authenticated Data to prevent cipher-text substitution attacks.
-3. **Tag Verification First**: Always verify the authentication tag (128-bit MAC) before releasing decrypted plaintext buffers.
-
-### Step 4: mTLS 1.3 & Transport Security Implementation
-
-1. Enforce TLS 1.3 (`TLS_AES_256_GCM_SHA384` or `TLS_CHACHA20_POLY1305_SHA256`). Disable SSLv3, TLS 1.0, and TLS 1.1.
-2. Configure Mutual TLS (mTLS): Require client certificate verification (`ClientAuth: RequireAndVerifyClientCert`).
-3. Enforce Subject Alternative Name (SAN) hostname validation and certificate pinning where applicable.
-
-### Step 5: Memory Zeroization & Cleanup
-
-1. Explicitly overwrite secret key buffers with zeros immediately after usage (`sodium_memzero()`, `explicit_bzero()`, or Rust `Zeroize` trait).
-
----
-
-## 3. Reference Implementation: ChaCha20-Poly1305 AEAD with HKDF
+Illustrative. Uses Node's built-in `crypto`; with random 96-bit nonces, rotate
+each key well before 2^32 encryptions, or use libsodium XChaCha20-Poly1305
+when one key encrypts unbounded volumes.
 
 ```typescript
-import { webcrypto } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 
-const crypto = webcrypto as unknown as Crypto;
+const FORMAT_VERSION = 1;
+const NONCE_LEN = 12;
+const TAG_LEN = 16;
+const HEADER_LEN = 1 + 4 + NONCE_LEN; // version | key ID (uint32 BE) | nonce
 
-// 1. HKDF Key Derivation (RFC 5869)
-export async function deriveAEADKey(
-  masterSecret: Uint8Array,
-  salt: Uint8Array,
-  info: string
-): Promise<CryptoKey> {
-  const masterKey = await crypto.subtle.importKey(
-    'raw',
-    masterSecret,
-    { name: 'HKDF' },
-    false,
-    ['deriveKey']
-  );
-
-  return crypto.subtle.deriveKey(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt,
-      info: new TextEncoder().encode(info),
-    },
-    masterKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
+export interface KeyRing {
+  currentKeyId: number;      // used for new encryptions
+  keys: Map<number, Buffer>; // 32-byte keys from a KMS or secret manager
 }
 
-// 2. AEAD Authenticated Encryption (AES-256-GCM / ChaCha20-Poly1305)
-export interface EncryptedPayload {
-  nonce: Uint8Array; // 12 Bytes (96 Bits)
-  ciphertext: Uint8Array; // Payload + 16-byte MAC Tag
+// Authenticate the header plus caller context (for example "users.ssn:42"),
+// so a ciphertext cannot be moved to another record or relabeled.
+function aad(header: Buffer, context: string): Buffer {
+  return Buffer.concat([header, Buffer.from(context, 'utf8')]);
 }
 
-export async function encryptAEAD(
-  plaintext: Uint8Array,
-  key: CryptoKey,
-  associatedData: Uint8Array
-): Promise<EncryptedPayload> {
-  // Generate fresh 96-bit CSPRNG nonce for every single operation
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-
-  const encryptedBuffer = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce,
-      additionalData: associatedData,
-      tagLength: 128, // 16-byte MAC Tag
-    },
-    key,
-    plaintext
-  );
-
-  return {
-    nonce,
-    ciphertext: new Uint8Array(encryptedBuffer),
-  };
+export function seal(ring: KeyRing, plaintext: Buffer, context: string): Buffer {
+  const key = ring.keys.get(ring.currentKeyId);
+  if (!key) throw new Error('current key is not loaded');
+  const header = Buffer.alloc(HEADER_LEN);
+  header.writeUInt8(FORMAT_VERSION, 0);
+  header.writeUInt32BE(ring.currentKeyId, 1);
+  randomBytes(NONCE_LEN).copy(header, 5);
+  const cipher = createCipheriv('chacha20-poly1305', key, header.subarray(5), {
+    authTagLength: TAG_LEN,
+  });
+  cipher.setAAD(aad(header, context), { plaintextLength: plaintext.length });
+  const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return Buffer.concat([header, body, cipher.getAuthTag()]);
 }
 
-// 3. AEAD Authenticated Decryption with Tag Verification
-export async function decryptAEAD(
-  payload: EncryptedPayload,
-  key: CryptoKey,
-  associatedData: Uint8Array
-): Promise<Uint8Array> {
+export function open(ring: KeyRing, envelope: Buffer, context: string): Buffer {
+  const fail = () => new Error('decryption failed'); // one error for every cause
+  if (envelope.length < HEADER_LEN + TAG_LEN) throw fail();
+  if (envelope.readUInt8(0) !== FORMAT_VERSION) throw fail();
+  const key = ring.keys.get(envelope.readUInt32BE(1));
+  if (!key) throw fail();
+  const header = envelope.subarray(0, HEADER_LEN);
+  const body = envelope.subarray(HEADER_LEN, envelope.length - TAG_LEN);
+  const decipher = createDecipheriv('chacha20-poly1305', key, header.subarray(5), {
+    authTagLength: TAG_LEN,
+  });
+  decipher.setAAD(aad(header, context), { plaintextLength: body.length });
+  decipher.setAuthTag(envelope.subarray(envelope.length - TAG_LEN));
   try {
-    const decryptedBuffer = await crypto.subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: payload.nonce,
-        additionalData: associatedData,
-        tagLength: 128,
-      },
-      key,
-      payload.ciphertext
-    );
-    return new Uint8Array(decryptedBuffer);
-  } catch (error) {
-    // Tag verification failure or tampered ciphertext
-    throw new Error('CRYPTOGRAPHIC_AUTHENTICATION_FAILED: Invalid MAC tag or tampered associated data.');
+    // Release nothing until final() has verified the tag.
+    return Buffer.concat([decipher.update(body), decipher.final()]);
+  } catch {
+    throw fail();
   }
 }
-
-// 4. Constant-Time Memory Zeroization
-export function zeroizeBuffer(buffer: Uint8Array): void {
-  buffer.fill(0);
-}
 ```
 
----
+## Guardrails
 
-## 4. Mathematical Security & Nonce Uniqueness Invariants
+- Revert or delete only files you created in this session, and say so. Never
+  discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions:
+  destroying or disabling a key (data encrypted under it becomes
+  unrecoverable), re-encrypting production data, or changing TLS settings on
+  production endpoints.
+- Never weaken a test, check, or parameter to make work pass. Reduced
+  password-hashing cost belongs only in clearly marked test configuration.
+- Never invent a cipher, mode, padding scheme, or handshake, and never disable
+  certificate verification, even temporarily.
+- Never hard-code, log, or commit keys, passwords, or plaintext secrets; use
+  placeholders in examples and reports.
+- Do not run scans or handshake tests against systems the user has not approved.
 
-$$\text{AEAD Nonce Uniqueness Theorem: } \forall i \neq j, \quad Nonce_i \neq Nonce_j \quad (\text{under same } Key_k)$$
+## Verification
 
-$$\text{Constant-Time Verification: } \text{Time}(\text{Compare}(A, B)) = C \quad (\text{independent of matching prefix length})$$
+Use the project's own test runner from `AGENTS.md`, `CLAUDE.md`, package
+scripts, or the `Makefile`. Run each check separately and report its real
+result; never chain alternatives with `||`.
 
-$$\text{Minimum Key Entropy: } H(Key) \ge 256 \text{ bits}$$
+- **Known-answer tests** from the specifications, run as ordinary test cases:
+  RFC 8439 (ChaCha20-Poly1305), RFC 5869 (HKDF), RFC 8032 (Ed25519), RFC 7748
+  (X25519), and RFC 9106 (Argon2). Add Project Wycheproof vectors, which are
+  JSON files, by loading them in the project's tests; there is no Wycheproof
+  command to run.
+- **Property tests:** round trip; flipping any byte of the version, key ID,
+  nonce, ciphertext, tag, or context fails with the generic error; a wrong key
+  fails; repeated encryptions produce distinct nonces; after rotation, old
+  envelopes still decrypt and new ones carry the new key ID.
+- **TLS tests:** handshakes fail for TLS 1.1, for a missing client certificate,
+  and for a certificate from the wrong CA. Against an approved local or
+  staging endpoint, `openssl s_client -connect host:port -tls1_3` should
+  succeed and `-tls1_1` should fail. OpenSSL 3 clients refuse TLS 1.1 at the
+  default security level, so add `-cipher 'DEFAULT@SECLEVEL=0'` to the TLS 1.1
+  attempt, or its failure proves nothing about the server.
+- **Misuse search:** look for `Math.random`, `createCipher(`, `ECB`, `md5`,
+  `sha1`, `InsecureSkipVerify`, `verify=False`, and `rejectUnauthorized`, and
+  triage every hit.
 
-$$\text{AEAD Integrity Guardrail: } \text{Decrypt}(C, K, AAD) = \begin{cases} P, & \text{if } \text{VerifyMAC}(C, K, AAD) = \text{VALID} \\ \mathbf{ERROR}, & \text{if } \text{VerifyMAC}(C, K, AAD) = \text{INVALID} \end{cases}$$
+## Report
 
----
+- **Constructions:** libraries and versions chosen, and why.
+- **Envelope and rotation:** format, associated data, and the rotation procedure.
+- **Nonces:** strategy and the per-key message limit.
+- **Keys:** source, access, and handling, with zeroization marked best effort
+  where the runtime cannot guarantee it.
+- **Passwords:** algorithm, parameters, and measured hashing time.
+- **Transport:** TLS versions, mTLS identity checks, and post-quantum status.
+- **Tests:** vectors and property tests run, with results.
+- **Exceptions:** any legacy algorithm kept, with its justification.
+- **Not verified:** platforms, interop partners, or settings not tested.
 
-## 5. Guardrails
+## Optional delegation
 
-### Operational Restrictions
-
-- **No Homebrew Cryptography**: Never design custom encryption, hashing, or key exchange algorithms; use audited, standard implementations (`libsodium`, `Web Crypto`, `ring`).
-- **No ECB Mode**: Electronic Codebook (ECB) mode is strictly forbidden. Always use AEAD modes (`AES-256-GCM`, `ChaCha20-Poly1305`).
-- **No Nonce Reuse**: Reusing a nonce with GCM or Poly1305 completely breaks message integrity and leaks key material.
-- **Zero Hardcoded Keys**: Secrets must never be stored in source code; load keys from secure key vaults (KMS, Vault) or environment variables.
-
-### Security Invariants
-
-- **Constant-Time Comparison**: Use `crypto.timingSafeEqual()` or equivalent constant-time comparison functions for secret hashes and signatures.
-- **Immediate Memory Zeroization**: Overwrite secret keys in memory (`zeroize()`) as soon as cryptographic operations complete.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-Before implementing cryptographic modules, record git baseline state. If unit tests or Wycheproof test vector validation fails:
-
-```bash
-# Revert modified files
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove newly created files
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Execute test suites and vector validation:
-
-```bash
-# 1. Run unit tests with crypto vector assertions
-npm test
-
-# 2. Run Wycheproof test vector checks (Go / Rust / Python)
-go test -v ./crypto/... -run TestWycheproof
-```
-
----
-
-## 8. Completion Report
-
-Report primitive types implemented, key sizes, CSPRNG sources, nonce generation strategy, AAD metadata integration, constant-time comparison verification, memory zeroization status, and test vector validation proofs.
+The `security-reviewer` subagent can review the finished cryptographic code
+independently, and the `test-writer` subagent can add known-answer and tamper
+tests. Re-run their key checks before relying on them. One agent can complete
+this workflow alone.
