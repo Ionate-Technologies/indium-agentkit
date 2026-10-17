@@ -1,114 +1,105 @@
 ---
 name: rtos-firmware-development
-description: Write deterministic, low-latency task schedulers and peripheral drivers for embedded FreeRTOS/Zephyr devices.
+description: "Implement or change FreeRTOS or Zephyr firmware: tasks, ISRs, peripheral drivers (SPI, I2C, UART, CAN), DMA, watchdogs, and memory budgets, verified with cross-compiled builds, size checks, and static analysis. Use when writing or modifying embedded RTOS code for Cortex-M, RISC-V, or ESP32 targets. Not for test rigs (use the hardware-in-loop-testing skill). Never flashes a device without explicit approval."
 ---
 
 # RTOS Firmware Development
 
-Implement deterministic, low-latency firmware tasks, peripheral drivers (SPI, I2C, UART, CAN), and memory protection routines for embedded microcontrollers (ARM Cortex-M, RISC-V, ESP32) using Real-Time Operating Systems (FreeRTOS, Zephyr RTOS, ThreadX).
+Write firmware that meets its timing, memory, and interrupt rules on the actual
+target, and prove it builds, fits, and passes static analysis before anything
+touches hardware. The stance is **hardware-safe by default**: build and analyze
+on the host; flashing, erasing, or reconfiguring a device needs explicit approval.
 
-The skill is **hardware-safe and contract-first**: task priorities, stack allocations, peripheral hardware registers, DMA buffers, and watchdog refresh windows are verified before implementation.
+## When to use
 
----
+- Adding or changing a task, ISR, queue, driver, or DMA transfer.
+- Fixing priority inversion, stack overflow, missed deadlines, or watchdog resets.
+- Porting a driver between FreeRTOS and Zephyr, or between MCU families.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Building or running a hardware-in-the-loop or simulation rig: use the
+  `hardware-in-loop-testing` skill.
+- An independent firmware audit: delegate to the `iot-embedded-auditor` subagent.
+- Secure boot, image signing, or other cryptography: use the
+  `cryptographic-protocol-implementation` skill.
+- A defect whose cause is unknown: use the `systematic-debugging` skill first.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Implement a FreeRTOS SPI DMA sensor driver for STM32F4 with 5ms task rate and watchdog refresh"*), the agent **must automatically infer and populate** `target_mcu`, `rtos_kernel`, `task_spec`, `peripheral_spec`, and `memory_budget` from the user's text and repository configuration.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "RtosFirmwareContextManifest",
-  "type": "object",
-  "required": ["hardware_target", "firmware_spec"],
-  "properties": {
-    "hardware_target": {
-      "type": "object",
-      "required": ["mcu_architecture", "clock_frequency_mhz"],
-      "properties": {
-        "mcu_architecture": { "type": "string", "enum": ["cortex_m0", "cortex_m4f", "cortex_m7", "riscv32", "esp32s3"] },
-        "clock_frequency_mhz": { "type": "integer" },
-        "flash_size_kb": { "type": "integer" },
-        "sram_size_kb": { "type": "integer" }
-      }
-    },
-    "firmware_spec": {
-      "type": "object",
-      "required": ["rtos_kernel", "task_name", "priority"],
-      "properties": {
-        "rtos_kernel": { "type": "string", "enum": ["freertos", "zephyr", "threadx", "bare_metal"] },
-        "task_name": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
-        "priority": { "type": "integer" },
-        "stack_size_words": { "type": "integer", "default": 256 },
-        "period_ms": { "type": "integer" }
-      }
-    },
-    "peripheral_spec": {
-      "type": "object",
-      "required": ["bus_type"],
-      "properties": {
-        "bus_type": { "type": "string", "enum": ["spi", "i2c", "uart", "can", "gpio", "none"] },
-        "use_dma": { "type": "boolean", "default": true },
-        "timeout_ms": { "type": "integer", "default": 100 }
-      }
-    }
-  }
-}
-```
+- The exact MCU part and core. Cortex-M4F and Cortex-M7 differ in ways that
+  matter here (the M7 usually has a data cache).
+- RTOS and version: `FreeRTOSConfig.h`, or Zephyr `prj.conf`, Kconfig, and
+  devicetree overlays.
+- Interrupt configuration: `configPRIO_BITS`,
+  `configMAX_SYSCALL_INTERRUPT_PRIORITY`,
+  `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`, and the NVIC priority grouping.
+- Linker script, memory map, heap scheme (`heap_4.c`, static allocation), and
+  the current size of the image.
+- The HAL in use (STM32 HAL, nrfx, ESP-IDF, Zephyr drivers) and sibling drivers
+  to copy conventions from.
+- Timing requirements (periods, deadlines, worst-case latency) from the
+  requirements or datasheets, not guesses.
+- Build, size, and static analysis commands from `AGENTS.md`, CMake presets,
+  the `Makefile`, or `west`.
 
-### Automatic Natural Language Inference & Safety Rules
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+1. **Orient.** Read the RTOS configuration, the linker script, and two sibling
+   drivers. Note whether the core has a data cache, the tick rate, and how
+   interrupt priorities are assigned.
+2. **Design tasks.** For each task record its period or trigger, deadline,
+   priority, stack size, and the resources it shares. Give shorter deadlines
+   higher priority as a starting point. Protect shared peripherals with a mutex
+   (which has priority inheritance), never a binary semaphore. Pass data through
+   queues; signal events with direct-to-task notifications or semaphores.
+3. **Keep ISRs short and legal.**
+   - Call only `FromISR` APIs, then `portYIELD_FROM_ISR`; defer work to a task.
+   - On Cortex-M, any ISR that calls a FreeRTOS API must have a logical priority
+     at or below `configMAX_SYSCALL_INTERRUPT_PRIORITY`, which means a numeric
+     priority value equal to or greater than it (higher numbers are less
+     urgent). With the STM32 HAL, compare the unshifted value passed to
+     `HAL_NVIC_SetPriority` against `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY`.
+     With `configASSERT` defined, recent ports catch violations at run time.
+   - Never take a mutex or block in an ISR.
+4. **Make DMA safe.**
+   - DMA buffers are static or global, never on a task stack.
+   - On a core with a data cache enabled (for example Cortex-M7 parts such as
+     STM32F7 and STM32H7), align buffers to 32 bytes and pad them to whole cache
+     lines, clean the cache over a TX buffer before starting, and invalidate it
+     over an RX buffer after completion, or place buffers in non-cacheable
+     memory through the MPU. Cores without a data cache, such as the STM32F4's
+     Cortex-M4, need none of this.
+   - Wait for completion with a timeout. On timeout, abort the transfer, then
+     drain any completion signal that raced the abort so the next cycle does not
+     consume a stale one.
+5. **Handle peripheral failure.** Recover a stuck I2C bus (clock SCL up to nine
+   times while SDA is held low, then issue a STOP) when a slave can hang the
+   bus. Check UART overrun and framing flags and use ring buffers with
+   single-writer indices. Handle CAN error-passive and bus-off states explicitly.
+6. **Supervise with the watchdog.** One monitor task refreshes the hardware
+   watchdog only after every supervised task has checked in within its window
+   (for example with event-group bits). Never refresh it from an ISR or the tick
+   hook, which keeps it fed while tasks hang.
+7. **Bound memory.** Set `configCHECK_FOR_STACK_OVERFLOW` to 2 and implement
+   `vApplicationStackOverflowHook`. Measure each task with
+   `uxTaskGetStackHighWaterMark` (words left at the low point) under worst-case
+   load, and the heap with `xPortGetMinimumEverFreeHeapSize` for heap_4 and
+   heap_5. `configASSERT` every handle and creation result.
+8. **Build and analyze** (see Verification).
+9. **Hardware runs need approval.** Ask before flashing, erasing, or resetting
+   a device; then report exactly what was run.
 
-- **`mcu_architecture`**: Extracted from CMake / Kconfig / `FreeRTOSConfig.h` or prompt keywords (e.g. "STM32F4" $\rightarrow$ `cortex_m4f`).
-- **`rtos_kernel`**: Inferred from codebase imports (`#include "FreeRTOS.h"` $\rightarrow$ `freertos`, `#include <zephyr/kernel.h>` $\rightarrow$ `zephyr`).
-- **`task_name`**: Derived from peripheral or feature name (e.g. `sensor_read_task`).
-- **`priority`**: Assigned based on timing criticality (e.g. Motor control = High priority `5`, Status LED = Low priority `1`).
-- **`bus_type`**: Extracted from prompt or peripheral datasheet specs.
+## Reference (illustrative)
 
----
+### FreeRTOS: SPI DMA read with a task notification
 
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Context Ingestion & Hardware Discovery
-
-1. Read `AGENTS.md`, `FreeRTOSConfig.h` / `prj.conf`, linker scripts (`.ld`), and target board definitions.
-2. Inspect sibling driver implementations to inherit peripheral register abstractions, HAL conventions, and error codes.
-3. Verify MCU memory budgets (Flash and SRAM limits) to prevent stack overflow or heap exhaustion.
-
-### Step 2: Task Scheduler & Priority Design
-
-1. Define task priority matrix preventing **Priority Inversion** (use Mutexes with Priority Inheritance `xSemaphoreCreateMutex()`, never plain binary semaphores for resource locking).
-2. Allocate task stack bounds ensuring $\ge 20\%$ unused stack headroom ($Stack_{free} \ge 0.20 \times Stack_{total}$).
-3. Enable task stack overflow checking (`#define configCHECK_FOR_STACK_OVERFLOW 2`).
-
-### Step 3: Peripheral Driver Implementation
-
-1. Implement non-blocking driver logic (Interrupt-driven or DMA transfers).
-2. **I2C Bus Recovery Guard**: Add 9-clock manual GPIO pulse sequence to clear stuck `SDA` lines before bus initialization.
-3. **SPI / DMA Cache Coherence**: Invalidate CPU Data Cache (`SCB_InvalidateDCache_by_Addr()`) around DMA buffers on Cortex-M7.
-4. **UART / CAN Overrun Protection**: Implement atomic ring buffer pointers and handle FIFO overflow flags in ISR handlers (`FromISR` API variants).
-
-### Step 4: Watchdog & System Protection
-
-1. Enforce dedicated System Monitor task for Watchdog (WDT / IWDG) refreshes.
-2. Verify all worker threads update heartbeat flags before the monitor task kicks the hardware watchdog.
-
-### Step 5: Build Verification & Seam Testing
-
-1. Compile firmware using the target cross-compiler (`arm-none-eabi-gcc`, `west build`, `ninja`).
-2. Run memory section analysis (`arm-none-eabi-size`) to ensure `.text`, `.data`, and `.bss` fit within Flash/SRAM boundaries.
-
----
-
-## 3. Reference Implementation: FreeRTOS SPI DMA Sensor Driver
+STM32F4 (Cortex-M4F, no data cache), FreeRTOS 10.4 or later, STM32 HAL. The
+DMA stream interrupts that complete SPI1 transfers must follow the priority rule
+in step 3, because the completion callback calls a `FromISR` API.
 
 ```c
 #include "FreeRTOS.h"
@@ -116,141 +107,149 @@ Follow this exact sequential protocol. Do not skip steps or alter execution orde
 #include "semphr.h"
 #include "stm32f4xx_hal.h"
 
-/* 1. Context & Task Configurations */
-#define SENSOR_TASK_STACK_SIZE   (512) // Words (2048 Bytes)
-#define SENSOR_TASK_PRIORITY     (configMAX_PRIORITIES - 2)
-#define SENSOR_READ_PERIOD_MS    (10)
+#define SENSOR_STACK_WORDS 512U          /* xTaskCreate takes words: 2048 bytes */
+#define SENSOR_PRIORITY    (tskIDLE_PRIORITY + 3U)
+#define SENSOR_PERIOD_MS   10U
+#define SENSOR_XFER_LEN    6U
 
-static TaskHandle_t xSensorTaskHandle = NULL;
-static SemaphoreHandle_t xSPIMutex = NULL;
-static SemaphoreHandle_t xDMACompleteSem = NULL;
-extern SPI_HandleTypeDef hspi1;
+extern SPI_HandleTypeDef hspi1;          /* initialized by the HAL setup code */
 
-/* 2. DMA Interrupt Callback */
-void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
+static TaskHandle_t sensorTask;
+static SemaphoreHandle_t spiMutex;       /* shared bus: a mutex gives priority inheritance */
+static uint32_t overruns;
+static uint32_t dmaTimeouts;
+
+/* Static DMA buffers, never on a task stack. Read command per the sensor datasheet. */
+static uint8_t txBuf[SENSOR_XFER_LEN] = { 0xE8U };
+static uint8_t rxBuf[SENSOR_XFER_LEN];
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
     if (hspi->Instance == SPI1) {
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xSemaphoreGiveFromISR(xDMACompleteSem, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        BaseType_t woken = pdFALSE;
+        vTaskNotifyGiveFromISR(sensorTask, &woken);
+        portYIELD_FROM_ISR(woken);
     }
 }
 
-/* 3. Deterministic Task Execution Loop */
-void vSensorDriverTask(void *pvParameters) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    uint8_t txBuffer[6] = {0x80 | 0x28, 0, 0, 0, 0, 0}; // Read multi-byte command
-    uint8_t rxBuffer[6] = {0};
+static void sensorTaskFn(void *arg)
+{
+    (void)arg;
+    TickType_t lastWake = xTaskGetTickCount();
 
     for (;;) {
-        // Enforce deterministic execution period
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(SENSOR_READ_PERIOD_MS));
-
-        // Acquire SPI bus lock with priority inheritance
-        if (xSemaphoreTake(xSPIMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            
-            // Initiate non-blocking SPI DMA Transfer
-            if (HAL_SPI_TransmitReceive_DMA(&hspi1, txBuffer, rxBuffer, 6) == HAL_OK) {
-                
-                // Wait for DMA completion interrupt with timeout safety
-                if (xSemaphoreTake(xDMACompleteSem, pdMS_TO_TICKS(20)) == pdTRUE) {
-                    // Process sensor readings
-                    int16_t accelX = (int16_t)((rxBuffer[2] << 8) | rxBuffer[1]);
-                    (void)accelX; // Consume sample
-                } else {
-                    // DMA Timeout: Abort transfer and reset peripheral
-                    HAL_SPI_Abort(&hspi1);
-                }
-            }
-            
-            xSemaphoreGive(xSPIMutex);
+        if (xTaskDelayUntil(&lastWake, pdMS_TO_TICKS(SENSOR_PERIOD_MS)) == pdFALSE) {
+            overruns++;                  /* the previous cycle ran past its period */
         }
+        if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+            continue;                    /* bus busy: skip this cycle, never block forever */
+        }
+        if (HAL_SPI_TransmitReceive_DMA(&hspi1, txBuf, rxBuf, SENSOR_XFER_LEN) == HAL_OK) {
+            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2)) != 0U) {
+                int16_t accelX = (int16_t)(((uint16_t)rxBuf[2] << 8) | rxBuf[1]);
+                (void)accelX;            /* hand off through a queue in real code */
+            } else {
+                dmaTimeouts++;
+                (void)HAL_SPI_Abort(&hspi1);
+                (void)ulTaskNotifyTake(pdTRUE, 0); /* drain a completion that raced the abort */
+            }
+        }
+        xSemaphoreGive(spiMutex);
     }
 }
 
-/* 4. Driver Scaffolding & Initialization */
-void vSensorDriverInit(void) {
-    xSPIMutex = xSemaphoreCreateMutex();
-    vSemaphoreCreateBinary(xDMACompleteSem);
-    xSemaphoreTake(xDMACompleteSem, 0); // Start locked
+void sensorInit(void)
+{
+    spiMutex = xSemaphoreCreateMutex();
+    configASSERT(spiMutex != NULL);
 
-    configASSERT(xSPIMutex != NULL);
-
-    xTaskCreate(
-        vSensorDriverTask,
-        "SensorRead",
-        SENSOR_TASK_STACK_SIZE,
-        NULL,
-        SENSOR_TASK_PRIORITY,
-        &xSensorTaskHandle
-    );
+    BaseType_t created = xTaskCreate(sensorTaskFn, "sensor", SENSOR_STACK_WORDS, NULL,
+                                     SENSOR_PRIORITY, &sensorTask);
+    configASSERT(created == pdPASS);
 }
 ```
 
----
+Notes on the example:
 
-## 4. Latency, Task Jitter & Memory Safety Invariants
+- `pdMS_TO_TICKS` rounds down. At a 100 Hz tick, `pdMS_TO_TICKS(2)` is 0 and
+  the wait never blocks; check every timeout against `configTICK_RATE_HZ`.
+- If this task also uses stream buffers or another notifier, use a dedicated
+  notification index (`ulTaskNotifyTakeIndexed`) or a binary semaphore created
+  with `xSemaphoreCreateBinary`. `vSemaphoreCreateBinary` is deprecated.
+- Kernels before 10.4 have `vTaskDelayUntil`, which returns nothing.
+- ESP-IDF's FreeRTOS measures stack sizes and high-water marks in bytes, not
+  words; check the port before sizing stacks.
+- On a Cortex-M7 with the data cache on, declare 32-byte buffers with
+  `__attribute__((aligned(32)))`, call `SCB_CleanDCache_by_Addr` on the TX
+  buffer before starting, and `SCB_InvalidateDCache_by_Addr` on the RX buffer
+  after the notification arrives.
 
-$$\text{Task Execution Jitter: } Jitter(t) = |t_{\text{actual\_wake}} - t_{\text{expected\_wake}}| \le 50 \, \mu\text{s}$$
+### Zephyr equivalents
 
-$$\text{Stack Headroom Safety: } Stack_{\text{free\_bytes}} \ge 0.20 \times Stack_{\text{total\_bytes}}$$
+- Signaling: `k_sem_give` is safe from an ISR; the thread waits with
+  `k_sem_take(&sem, K_MSEC(2))`. Use `k_poll` to wait on several events,
+  `k_mutex` (priority inheritance) for shared resources, and `k_msgq` for data.
+- Hardware comes from devicetree: get the bus with `SPI_DT_SPEC_GET` and
+  transfer with `spi_transceive_dt`; enable drivers in `prj.conf`.
+- Zero-latency interrupts must not call kernel APIs.
+- Stacks and supervision: `CONFIG_HW_STACK_PROTECTION` or
+  `CONFIG_STACK_SENTINEL`, `CONFIG_THREAD_ANALYZER` for usage, and the task
+  watchdog subsystem (`CONFIG_TASK_WDT`) for per-thread supervision.
 
-$$\text{Flash Usage: } \text{Section}(.text) + \text{Section}(.rodata) + \text{Section}(.data) \le \text{Flash}_{\text{capacity}}$$
+## Guardrails
 
-$$\text{SRAM Usage: } \text{Section}(.data) + \text{Section}(.bss) + \sum Stack_i + Heap_{\text{max}} \le 0.90 \times \text{SRAM}_{\text{capacity}}$$
+- Never flash, erase, reset, or debug-attach to a device without explicit
+  approval. Never change option bytes, enable read-out protection, or blow
+  eFuses without written confirmation of the exact operation; some of these are
+  permanent.
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Never weaken a check to make a build pass: no disabling `configASSERT`, stack
+  overflow checking, warnings, or the watchdog.
+- Every blocking call has a finite timeout chosen from the timing requirement.
+- Do not change the linker script, clock tree, or interrupt priority scheme as a
+  side effect of a driver change; raise it as a separate decision.
 
----
+## Verification
 
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Priority Inheritance Mandatory**: Always use Mutexes (`xSemaphoreCreateMutex()`) for shared peripheral locks; never use raw binary semaphores which cause priority inversion.
-- **No Blocking Calls in ISRs**: Never call blocking RTOS functions (`vTaskDelay`, `xQueueReceive` without 0 timeout) inside Interrupt Service Routines.
-- **Stack Overflow Hook Enabled**: Always configure stack overflow hooks (`configCHECK_FOR_STACK_OVERFLOW = 2`).
-
-### Security & Hardware Invariants
-
-- **DMA Cache Invalidation**: Always invalidate CPU data cache before reading DMA reception buffers on cached architectures (Cortex-M7).
-- **I2C Bus Lockup Recovery**: Always implement manual 9-clock pulse sequences to clear stuck bus lines before initializing I2C peripherals.
-- **Zero Unbounded Locks**: All semaphore/mutex acquisitions must specify explicit non-zero timeouts.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-Before modifying firmware sources or linker scripts, capture git baseline state. If build or size compilation fails:
-
-```bash
-# Revert modified files
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove newly created files
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Execute cross-compilation and static analysis checks:
+Use the project's own commands. Run each check separately and report its real
+result; never chain alternatives with `||`.
 
 ```bash
-# 1. Compile firmware using target toolchain
-arm-none-eabi-gcc -c -mcpu=cortex-m4 -mthumb -O2 -Wall -Wextra src/main.c -o build/main.o
-
-# 2. Check section memory sizes
+# Illustrative. Build and link to an ELF with the project's build, then size that ELF.
+cmake --build build
 arm-none-eabi-size build/firmware.elf
 
-# 3. For Zephyr RTOS projects
-west build -b stm32f4_disc1 app
+# Zephyr: west prints a memory usage table at link time.
+west build -b <board> app
+west build -t ram_report
+
+# Static analysis; add MISRA checking if the project has licensed rule texts or a tool.
+cppcheck --enable=warning,style,portability --inline-suppr -I include src
 ```
 
----
+- The build succeeds with the project's warning flags and no new warnings.
+- Size: `text + data` fits flash and `data + bss` plus heap and stacks fit RAM,
+  with the margin the project requires. Compare with the size before the change.
+- GCC's `-fstack-usage` output or the RTOS high-water marks show stack headroom
+  for the changed tasks.
+- Static analysis reports no new findings in the changed files.
+- Host-side unit tests for driver logic pass, if the project has them.
+- Anything run on hardware or in simulation is reported with its approval.
 
-## 8. Completion Report
+## Report
 
-Report target MCU architecture, RTOS kernel version, tasks created with stack/priority metrics, memory usage breakdown (Flash & SRAM percentages), peripheral drivers implemented, build verification output, and safety audit results.
+- **Target:** MCU, core, RTOS and version, toolchain.
+- **Changes:** tasks and ISRs added or changed, with priority, period, stack
+  size, and measured high-water mark where available.
+- **Interrupts:** each ISR that calls the RTOS, with its numeric priority.
+- **Memory:** flash and RAM use before and after.
+- **Verification:** each command and its result.
+- **Not verified:** hardware behavior, timing under load, and anything not run.
+
+## Optional delegation
+
+- Delegate an independent audit of priorities, ISR rules, DMA, and stack use to
+  the `iot-embedded-auditor` subagent.
+- Use the `hardware-in-loop-testing` skill to test the change in simulation or
+  on an approved rig.

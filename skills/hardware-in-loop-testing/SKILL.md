@@ -1,263 +1,227 @@
 ---
 name: hardware-in-loop-testing
-description: Interface hardware-in-the-loop (HIL) simulation testbeds with embedded firmware endpoints under noise and faults.
+description: "Build simulation and hardware-in-the-loop test suites for embedded firmware: instrument-timed stimulus, fault injection (brownout, bus disconnect, sensor noise), recovery checks, and guaranteed safe teardown, running first in Renode, QEMU, or a software model. Use when firmware behavior must be verified against simulated or real hardware signals. Not for writing the firmware itself (use the rtos-firmware-development skill)."
 ---
 
-# Hardware-in-the-Loop (HIL) Testing
+# Hardware-in-the-Loop Testing
 
-Implement hardware-in-the-loop (HIL) simulation test suites, sensor noise injection protocols, hardware fault injection (voltage brownouts, clock jitter, bus disconnects), signal generators (DAQ, CANoe, LabVIEW, PyVISA, SCPI), and automated PASS/FAIL regression testbeds for embedded firmware validation.
+Verify firmware against realistic signals and faults, and leave every rig in a
+safe state no matter how a test ends. The stance is **simulation first, people
+in control of energy**: tests run in a simulator or against simulated
+instruments by default, and real hardware is energized only with an explicit
+human go-ahead.
 
-The skill is **hardware-safe and SLA-bounded**: instrument connections, power limits, signal ranges, noise models, fault injection triggers, and emergency power-off safety relays are verified before executing test runs.
+## When to use
 
----
+- Testing how firmware reacts to sensor input, noise, bus loss, brownouts, or
+  watchdog starvation.
+- Building or extending a pytest-based HIL harness with programmable supplies,
+  signal sources, DAQs, relays, or CAN interfaces.
+- Moving a test from a bench script into a repeatable, simulated-first suite.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Writing or fixing the firmware: use the `rtos-firmware-development` skill.
+- A test that passes and fails on the same build: use the `flaky-test-triage`
+  skill (rig timing is a common cause).
+- Wiring the suite into a CI pipeline: use the `ci-pipeline` skill.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Run a PyVISA HIL test suite injecting 50mV Gaussian white noise on the ADC input of an STM32 MCU and verify 2s recovery after brownout"*), the agent **must automatically infer and populate** `rig_type`, `noise_model`, `fault_type`, and `pass_fail_criteria` from the user's text and testbed environment.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository and rig documentation before asking. Ask
+only about what remains ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "HilTestingContextManifest",
-  "type": "object",
-  "required": ["testbed_spec", "test_scenario"],
-  "properties": {
-    "testbed_spec": {
-      "type": "object",
-      "required": ["rig_type", "instrument_address"],
-      "properties": {
-        "rig_type": { 
-          "type": "string", 
-          "enum": ["benchtop_daq", "can_bus_simulator", "renode_emulator", "custom_pyvisa"] 
-        },
-        "instrument_address": { "type": "string" },
-        "max_voltage_limit": { "type": "number", "default": 3.3 },
-        "safety_relay_enabled": { "type": "boolean", "default": true }
-      }
-    },
-    "test_scenario": {
-      "type": "object",
-      "required": ["noise_model", "fault_type"],
-      "properties": {
-        "noise_model": { 
-          "type": "string", 
-          "enum": ["gaussian_white_noise", "impulse_spike", "thermal_drift", "packet_corruption", "none"] 
-        },
-        "noise_amplitude_v": { "type": "number", "default": 0.05 },
-        "fault_type": { 
-          "type": "string", 
-          "enum": ["voltage_brownout", "bus_disconnection", "clock_jitter", "watchdog_starvation", "none"] 
-        },
-        "fault_duration_ms": { "type": "integer", "default": 500 }
-      }
-    },
-    "pass_fail_criteria": {
-      "type": "object",
-      "required": ["max_recovery_latency_ms"],
-      "properties": {
-        "max_recovery_latency_ms": { "type": "integer", "default": 2000 },
-        "allowed_packet_loss_pct": { "type": "number", "default": 0.1 }
-      }
-    }
-  }
-}
-```
+- The device under test (DUT): part numbers, supply voltage, absolute maximum
+  ratings, brown-out threshold, and expected current, from the datasheets.
+- The rig inventory: each instrument's model and role, and its programming
+  manual. SCPI commands differ between models and vendors.
+- VISA resource strings and other rig settings from the project's configuration
+  files, never hard-coded in tests.
+- Available simulation: Renode platform and script files, QEMU machine support,
+  pyvisa-sim instrument definitions, or a software model of the DUT protocol.
+- Pass criteria from the requirements (accuracy, recovery time, safe-state
+  behavior). Do not invent limits; record missing ones as open questions.
+- Safety arrangements: OVP and OCP limits, interlocks, the emergency stop, and
+  who will be physically present.
+- Test commands from `AGENTS.md`, package scripts, or the `Makefile`.
 
-### Automatic Natural Language Inference & Over-Voltage Protection
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+1. **Define each scenario.** Write the stimulus, the observation, and the pass
+   criterion from the requirement, for example "after a 200 ms dip below the
+   brown-out threshold, the DUT reports a brown-out reset and resumes its
+   heartbeat within the requirement's limit (for example 2 s)".
+2. **Choose the lowest tier that answers the question.**
+   - Software model or simulated instruments (pyvisa-sim) to test the harness
+     logic itself.
+   - Renode or QEMU running the real firmware image, for control flow, protocol
+     handling, and faults that can be modeled (a missing peripheral, injected
+     sensor values, forced resets).
+   - The real rig, only for analog behavior, real timing, and power faults, and
+     only after step 6.
+3. **Separate instrument roles.** Keep the DUT power supply (with OVP and OCP)
+   distinct from the signal source (function generator, AWG, or DAC) and from
+   measurement (DAQ, scope, logic analyzer). Wrap each in a small class whose
+   commands are checked against that model's programming manual, and confirm
+   the model with `*IDN?` before use.
+4. **Let instruments do the timing.** For timed waveforms, dips, and noise,
+   upload samples to the instrument's arbitrary-waveform or list mode and
+   trigger it. Do not loop software-timed SCPI writes with `time.sleep`; host
+   and VISA latency add milliseconds of jitter. Measure timing with hardware
+   triggers or DUT timestamps when it matters; host `time.monotonic()` is
+   coarse and only suits loose limits.
+5. **Make teardown unconditional.** Instruments open in pytest fixtures whose
+   teardown disables every output and closes the session, even when the test
+   fails. Set limits and read them back before any output turns on. A crashed
+   host or lost connection skips teardown, so the rig still needs its own
+   protection: OVP and OCP, interlocks, and an emergency stop.
+6. **Get the go-ahead for real hardware.** Before energizing a real rig, state
+   the scenarios, voltages, currents, and durations, and wait for an explicit
+   human approval for this session. A person must be physically present at the
+   rig, or a remote emergency stop must be verified working, for every powered run.
+7. **Run, then report** each scenario with its tier, measured values, and
+   method of measurement.
 
-- **Over-Voltage Emergency Clamping**: If `max_voltage_limit` exceeds physical MCU ratings (e.g. $> 3.6\text{V}$ for 3.3V logic), **ABORT execution immediately** and trigger safety clamp `VOLTAGE_EXCEEDS_MCU_RATING`.
-- **`rig_type`**: Auto-detected from testbed configuration files (`pyvisa` address, `renode` script, `vector` CANoe setup).
-- **`noise_model`**: Defaults to `gaussian_white_noise` with amplitude $0.05\text{V}$.
-- **`max_recovery_latency_ms`**: Defaults to $2000\text{ ms}$ (2 seconds).
+## Reference: pytest fixture with guaranteed teardown (illustrative)
 
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Testbed Connection & VISA Instrument Handshake
-
-1. Establish connection to physical or emulated test instruments via PyVISA / SCPI or socket interface (`TCPIP::192.168.1.100::INSTR`, `GPIB::1::INSTR`).
-2. Query instrument identification string (`*IDN?`) and set output voltage limits (`VOLT:PROT 3.3`).
-
-### Step 2: Signal Generator Calibration & Noise Synthesis
-
-1. Generate target sensor signals (DAC analog voltages, PWM, CAN/UART message frames).
-2. Synthesize noise signals over base sensor outputs:
-   - **Gaussian White Noise**: $V_{\text{out}}(t) = V_{\text{base}}(t) + \mathcal{N}(0, \sigma^2)$.
-   - **Impulse Spikes**: Periodically inject $0.5\text{V}$ voltage spikes for $10\text{ ms}$ windows.
-
-### Step 3: Test Scenario Execution & Fault Injection
-
-1. **Scenario 1 (Nominal Tracking)**: Sweep sensor inputs from 0% to 100% full-scale; verify firmware output reading accuracy ($\ge 99.5\%$).
-2. **Scenario 2 (Sensor Noise & Drift)**: Inject Gaussian noise and thermal drift; verify firmware digital low-pass filtering (Kalman / Moving Average) smooths sensor signals.
-3. **Scenario 3 (Bus Disconnect & Timeout)**: Open physical relay or disable CAN transceiver for $500\text{ ms}$; verify firmware detects bus timeout and enters safe state.
-4. **Scenario 4 (Voltage Brownout & Self-Reset)**: Drop MCU supply voltage to $2.0\text{V}$ for $200\text{ ms}$; verify Brown-Out Reset (BOR) triggers and MCU successfully recovers within $2.0\text{s}$.
-
-### Step 4: Telemetry Capture & Latency / Recovery Analysis
-
-1. Measure real-time response latency from fault injection timestamp ($t_0$) to firmware recovery signal ($t_{\text{rec}}$):
-   $$\Delta t_{\text{recovery}} = t_{\text{rec}} - t_0 \le 2000 \text{ ms}$$
-2. Assert that no unhandled hard faults or permanent watchdog deadlocks occurred.
-
-### Step 5: Physical Safety Shutdown & Rig Teardown
-
-1. Zero all DAC signal generator outputs (`OUTPUT OFF`).
-2. Open power supply relays and disarm fault injection channels.
-3. Disconnect VISA session cleanly.
-
----
-
-## 3. Reference Implementation: Python / PyVISA & SCPI HIL Test Harness
+Defaults to simulated instruments. The SCPI strings follow a common pattern for
+list-capable bench supplies; confirm each one in your instrument's manual.
 
 ```python
-import time
-import math
-import random
+# tests/hil/conftest.py
+import os
+
+import pytest
 import pyvisa
 
-class HilTestbedHarness:
-    def __init__(self, resource_address: str, max_voltage: float = 3.3):
-        self.rm = pyvisa.ResourceManager()
-        self.inst = self.rm.open_resource(resource_address)
-        self.max_voltage = max_voltage
-        self.inst.timeout = 5000 // ms
-        
-    def setup_safety_limits(self):
-        """Configure SCPI voltage limits on programmable power supply / DAQ."""
-        self.inst.write(f"VOLT:LIMIT {self.max_voltage}")
-        self.inst.write("OUTP ON")
-        
-    def generate_sensor_signal_with_noise(self, duration_sec: float, noise_sigma: float = 0.05):
-        """Inject sine wave sensor signal + Gaussian noise onto DAC output."""
-        start_time = time.time()
-        print(f"[HIL] Injecting sensor signal with Gaussian noise (sigma={noise_sigma}V)...")
-        
-        while time.time() - start_time < duration_sec:
-            elapsed = time.time() - start_time
-            # Base 1.65V centered sine wave (0.5 Hz)
-            base_voltage = 1.65 + 1.0 * math.sin(2 * math.pi * 0.5 * elapsed)
-            # Add Gaussian noise
-            noise = random.gauss(0.0, noise_sigma)
-            target_voltage = max(0.0, min(self.max_voltage, base_voltage + noise))
-            
-            # Apply to DAQ DAC Channel 1 via SCPI
-            self.inst.write(f"SOUR:VOLT {target_voltage:.3f}")
-            time.sleep(0.01) // 100 Hz sampling rate
+# Simulated instruments (pyvisa-sim) unless a person has approved a real rig run.
+BACKEND = os.environ.get("HIL_VISA_BACKEND", "tests/hil/sim_instruments.yaml@sim")
+PSU_RESOURCE = os.environ.get("HIL_PSU_RESOURCE", "TCPIP0::192.0.2.10::INSTR")  # placeholder
 
-    def inject_voltage_brownout(self, drop_voltage: float = 1.8, duration_ms: float = 300) -> float:
-        """Inject brownout fault and measure firmware recovery time."""
-        print(f"[HIL Fault] Injecting brownout ({drop_voltage}V for {duration_ms}ms)...")
-        t_fault = time.time()
-        
-        # Drop voltage
-        self.inst.write(f"SOUR:VOLT {drop_voltage}")
-        time.sleep(duration_ms / 1000.0)
-        
-        # Restore normal voltage
-        self.inst.write("SOUR:VOLT 3.3")
-        
-        # Poll for firmware heartbeat GPIO signal on DAQ Digital Input
-        t_recovery = None
-        while time.time() - t_fault < 5.0:
-            status = self.inst.query("SENS:DIG:DATA?").strip()
-            if status == "1": // Firmware GPIO Heartbeat active
-                t_recovery = time.time() - t_fault
-                break
-            time.sleep(0.01)
-            
-        if t_recovery is None:
-            raise RuntimeError("[HIL FAIL] Firmware failed to recover within 5s SLA after brownout.")
-            
-        print(f"[HIL SUCCESS] Firmware recovered in {t_recovery * 1000.0:.1f} ms.")
-        return t_recovery
+DUT_VOLTS = 3.3       # nominal supply, from the DUT datasheet
+DUT_OVP_VOLTS = 3.6   # at or below the DUT absolute maximum rating
+DUT_OCP_AMPS = 0.2    # expected draw plus margin, agreed with the hardware owner
 
-    def emergency_shutdown(self):
-        """Safety Teardown: Zero all outputs and open relays."""
-        print("[HIL Safety] Executing emergency shutdown...")
-        try:
-            self.inst.write("SOUR:VOLT 0.0")
-            self.inst.write("OUTP OFF")
-            self.inst.close()
-        except Exception as e:
-            print(f"[HIL Warning] Teardown error: {e}")
 
-if __name__ == "__main__":
-    # Example execution against virtual/physical VISA DAQ
-    harness = HilTestbedHarness("TCPIP0::127.0.0.1::1883::SOCKET")
+class PowerSupply:
+    """DUT supply. Generic SCPI: confirm every command in the model's programming manual."""
+
+    def __init__(self, inst):
+        self.inst = inst
+        self.nominal_volts = None
+        self.ovp_volts = None
+
+    def configure(self, volts, ovp_volts, ocp_amps):
+        self.inst.write("OUTP OFF")
+        self.inst.write(f"VOLT:PROT {ovp_volts:.3f}")
+        self.inst.write(f"CURR {ocp_amps:.3f}")
+        self.inst.write("CURR:PROT:STAT ON")
+        self.inst.write(f"VOLT {volts:.3f}")
+        if abs(float(self.inst.query("VOLT:PROT?")) - ovp_volts) > 0.01:
+            raise RuntimeError("OVP setting was not accepted; refusing to continue")
+        self.nominal_volts = volts
+        self.ovp_volts = ovp_volts
+
+    def output(self, enabled):
+        self.inst.write("OUTP ON" if enabled else "OUTP OFF")
+
+    def run_list(self, volts, dwell_s):
+        """Play a voltage sequence timed by the instrument's list mode, not by Python."""
+        if self.ovp_volts is None or max(volts) >= self.ovp_volts:
+            raise ValueError("list voltages must stay below the configured OVP limit")
+        self.inst.write("LIST:VOLT " + ",".join(f"{v:.3f}" for v in volts))
+        self.inst.write("LIST:DWEL " + ",".join(f"{d:.3f}" for d in dwell_s))
+        self.inst.write("VOLT:MODE LIST")
+        self.inst.write("TRIG:TRAN:SOUR BUS")
+        self.inst.write("INIT:TRAN")
+        self.inst.write("*TRG")
+
+
+@pytest.fixture
+def psu():
+    if not BACKEND.endswith("@sim") and os.environ.get("HIL_HARDWARE_APPROVED") != "1":
+        pytest.skip("real hardware needs explicit human approval for this session")
+    rm = pyvisa.ResourceManager(BACKEND)
+    inst = rm.open_resource(PSU_RESOURCE)
+    inst.timeout = 5000  # milliseconds
+    supply = PowerSupply(inst)
     try:
-        harness.setup_safety_limits()
-        harness.generate_sensor_signal_with_noise(duration_sec=3.0)
-        harness.inject_voltage_brownout(drop_voltage=1.8, duration_ms=250)
+        supply.configure(DUT_VOLTS, DUT_OVP_VOLTS, DUT_OCP_AMPS)
+        yield supply
     finally:
-        harness.emergency_shutdown()
+        try:
+            supply.output(False)  # always runs, even when the test fails
+        finally:
+            inst.close()
+            rm.close()
 ```
 
----
+```python
+# tests/hil/test_brownout.py
+import time
 
-## 4. Real-Time Signal & Recovery Invariants
+BROWNOUT_VOLTS = 2.0    # below the DUT brown-out threshold, from the datasheet
+RECOVERY_LIMIT_S = 2.0  # from the requirement; for example 2 s
 
-$$\text{Firmware Fault Recovery Latency: } \Delta t_{\text{recovery}} = t_{\text{recovery}} - t_{\text{fault}} \le 2000 \text{ ms}$$
 
-$$\text{Filtered Signal Accuracy: } |V_{\text{measured\_fw}} - V_{\text{base\_signal}}| \le 0.02 \times V_{\text{max}} \quad (\text{under } \sigma_{\text{noise}} \le 0.05\text{V})$$
+def test_recovers_after_brownout(psu, dut):
+    psu.output(True)
+    dut.wait_for_heartbeat(timeout_s=5.0)
 
-$$\text{Safety Relay Trip Time: } t_{\text{trip}} \le 50 \text{ ms} \quad (\text{on over-voltage breach})$$
+    psu.run_list(volts=[BROWNOUT_VOLTS, psu.nominal_volts], dwell_s=[0.2, 0.1])
+    fault_at = time.monotonic()
 
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Mandatory Safety Limits**: Never send voltage commands without setting `VOLT:LIMIT` on power supplies.
-- **Automated Teardown**: Always wrap instrument commands in `try...finally` blocks to guarantee `OUTP OFF` execution on failure.
-- **Isolated Power Supplies**: Never share HIL signal generator grounds with high-voltage mains without optoisolation.
-
-### Physical Safety Invariants
-
-- **No Over-Voltage Surges**: Over-voltage protection must clamp inputs before exceeding $3.6\text{V}$ for 3.3V logic microcontrollers.
-- **Relay Trip Verification**: Emergency relays must be tested before executing fault injection scenarios.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If an HIL test case fails or instrument communication drops:
-
-```bash
-# Execute emergency instrument shutdown via CLI script
-python3 -c "import pyvisa; rm = pyvisa.ResourceManager(); inst = rm.open_resource('TCPIP0::127.0.0.1::1883::SOCKET'); inst.write('OUTP OFF'); inst.write('SOUR:VOLT 0')" 2>/dev/null
-
-# Revert modified test config files
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
+    assert dut.wait_for_reset_reason("brownout", timeout_s=5.0)
+    recovered_at = dut.wait_for_heartbeat(timeout_s=5.0)
+    assert recovered_at - fault_at <= RECOVERY_LIMIT_S
 ```
 
----
+`dut` is a project fixture that reads firmware telemetry (for example over a
+UART) and returns `time.monotonic()` when a heartbeat arrives. Only the person
+running the rig sets `HIL_HARDWARE_APPROVED`; an agent never sets it. A signal
+source follows the same pattern: generate the samples in Python, upload them
+once as an arbitrary waveform with amplitude, offset, and output limits that
+keep the DUT input inside its rating, then trigger.
 
-## 7. Verification Plan & Toolchain Commands
+## Guardrails
 
-Execute HIL test suite:
+- Never energize, reconfigure, or flash real hardware without explicit human
+  approval for this session, and never without a person present or a verified
+  remote emergency stop.
+- Never exceed the DUT's absolute maximum ratings. Never disable OVP, OCP,
+  interlocks, or the emergency stop, and never raise a limit to make a test pass.
+- Keep mains-referenced equipment isolated from the DUT ground unless the rig
+  design says otherwise; ask the hardware owner when unsure.
+- Batteries, motors, heaters, and high-voltage rails need the hardware owner's
+  sign-off for every scenario that drives them.
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Never weaken a pass criterion or skip a failing scenario to make a run green.
 
-```bash
-# 1. Execute pytest HIL regression testbed
-pytest tests/hil/test_sensor_faults.py -v
+## Verification
 
-# 2. Run standalone PyVISA harness
-python3 scripts/run_hil_harness.py --config config/hil_benchtop.json
-```
+Use the project's own commands. Run each check separately and report its real
+result; never chain alternatives with `||`.
 
----
+- Every Python file in the harness passes `python -m py_compile` and the
+  project's lint.
+- The suite passes against simulated instruments or the simulator, including a
+  test that forces a failure and confirms teardown turned outputs off.
+- For an approved real run: limits read back before output on, `OUTP?` (or the
+  model's equivalent) reports off after teardown, and the measured values are
+  recorded with the method used to measure them.
 
-## 8. Completion Report
+## Report
 
-Report testbed rig type, VISA instrument addresses, noise models injected, fault scenarios tested (brownouts, bus disconnects), firmware recovery latencies, telemetry signal accuracy, and final PASS/FAIL verdict.
+- **Tier:** simulation, simulated instruments, or real rig, and the approval for
+  any real run.
+- **Rig:** each instrument's role and `*IDN?` response, and the DUT firmware version.
+- **Scenarios:** stimulus, pass criterion, measured result, and PASSED or FAILED.
+- **Safety:** limits configured and read back, teardown confirmation.
+- **Not verified:** scenarios not run, timing measured only on the host, and why.
+
+## Optional delegation
+
+- The `iot-embedded-auditor` subagent can review the firmware's fault and
+  recovery handling before you design scenarios.
+- The `test-writer` subagent can add simulation-tier tests for the harness.

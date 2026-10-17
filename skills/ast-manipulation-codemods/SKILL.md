@@ -1,233 +1,210 @@
 ---
 name: ast-manipulation-codemods
-description: Write Abstract Syntax Tree (AST) transformers to automate large-scale, syntax-aware codebase migrations.
+description: "Write, test, and run syntax-aware codemods (ast-grep, comby, jscodeshift, ts-morph, libcst, rust-analyzer) for large mechanical migrations such as API renames, import moves, and call-signature changes, with fixture tests, idempotency, and git diff as the review. Use when the same structural edit must land across many files. Not for judgment-driven restructuring (use the refactor-code skill)."
 ---
 
 # AST Manipulation Codemods
 
-Implement Abstract Syntax Tree (AST) transformers, syntax-aware refactoring tools, and automated codemods (jscodeshift, Babel AST, TypeScript Compiler API, libcst for Python, tree-sitter, Rust syn/quote) to execute large-scale, lossless codebase migrations without regex fragility or broken syntax errors.
+Apply one mechanical change across a codebase with a tool that understands the
+syntax, prove it on fixtures first, and leave a diff a human can review. The
+stance is **fixtures before the bulk run, clean tree before the bulk run**: the
+transform is tested on representative inputs, and it only runs on a working
+tree whose `git diff` will show nothing but the codemod's output.
 
-The skill is **syntax-aware and idempotent**: target node selectors, replacement visitors, comment preservation, dry-run diff previews, and AST transformation idempotency ($\text{Codemod}(\text{Codemod}(code)) = \text{Codemod}(code)$) are verified before mutating target files.
+## When to use
 
----
+- A rename, signature change, import move, or API migration repeated across
+  dozens or hundreds of call sites.
+- A library upgrade that ships, or needs, a codemod.
+- A structural search ("every call to X with a literal second argument") that
+  plain text search cannot answer reliably.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Restructuring that needs judgment per site: use the `refactor-code` skill.
+- Choosing or sequencing dependency upgrades: use the `upgrade-dependencies`
+  skill, then return here for the mechanical part.
+- A handful of call sites: edit them directly.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Write a jscodeshift codemod to refactor deprecated `logger.warn(msg)` calls to `logger.warning({ message: msg })` across all TypeScript files"*), the agent **must automatically infer and populate** `target_language`, `ast_parser`, `transformation_pattern`, and `file_glob` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AstCodemodContextManifest",
-  "type": "object",
-  "required": ["transformer_spec", "target_scope"],
-  "properties": {
-    "transformer_spec": {
-      "type": "object",
-      "required": ["target_language", "ast_parser"],
-      "properties": {
-        "target_language": { 
-          "type": "string", 
-          "enum": ["typescript", "javascript", "python", "rust", "go", "java"] 
-        },
-        "ast_parser": { 
-          "type": "string", 
-          "enum": ["jscodeshift", "babel_parser", "ts_morph", "libcst", "syn_quote", "tree_sitter"] 
-        },
-        "idempotent_required": { "type": "boolean", "default": true },
-        "preserve_comments": { "type": "boolean", "default": true }
-      }
-    },
-    "target_scope": {
-      "type": "object",
-      "required": ["file_glob"],
-      "properties": {
-        "file_glob": { "type": "string", "default": "src/**/*.{ts,tsx,js,jsx}" },
-        "exclude_glob": { "type": "string", "default": "**/node_modules/**" },
-        "dry_run_first": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
-```
+- The exact before and after forms, with real examples copied from the codebase.
+- Languages and file kinds in scope (`.ts`, `.tsx`, `.js`, `.py`, `.rs`) and
+  what to exclude (generated code, vendored code, fixtures, `.d.ts` files).
+- The project's formatter, type check, lint, and test commands from
+  `AGENTS.md`, package scripts, or the `Makefile`.
+- Whether a codemod already exists for this migration (library release notes
+  often ship one).
 
-### Automatic Natural Language Inference & Regex Rejection
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and strict safety checks:
+1. **Inventory.** Search for every variant before writing the transform:
+   aliases (`const log = logger`), optional chaining (`logger?.warn`), computed
+   access, spread arguments, re-exports, and dynamic uses no codemod can see.
+   Record counts; they are the baseline for the run. A text search such as
+   `rg -n 'logger\??\.warn\(' src/` gives a first count; an `ast-grep` pattern
+   gives a structural one (check `ast-grep run --help` for how your version
+   selects `.ts` versus `.tsx` files).
+2. **Choose the tool by need.**
+   - Unambiguous literal rename (a unique package name or config key): plain
+     search and replace is acceptable once a search shows every hit is the target.
+   - Quick structural search and replace across languages: `ast-grep` or
+     `comby`. Patterns match syntax, not text, and both preview before writing.
+   - TypeScript and JavaScript with conditional logic: `jscodeshift` (export
+     `parser = 'tsx'` for TypeScript), or `ts-morph` when the rewrite needs type
+     information, such as whether `logger` is the application logger.
+   - Python: `libcst`, which preserves comments and formatting; its
+     `libcst.codemod` package includes a test base class for before and after cases.
+   - Rust: rust-analyzer's structural search and replace for call-site
+     rewrites; `syn` for custom tools, noting that `syn` drops ordinary
+     comments, so run `rustfmt` and review comment loss.
+3. **Write fixtures first.** Input and expected output pairs covering the main
+   form, each edge case from the inventory, and no-op cases: already migrated
+   code, look-alikes on other objects, and shapes the transform must leave alone.
+4. **Implement narrowly.** Match the exact callee and shape. Mutate the matched
+   nodes in place so comments and untouched code keep their formatting. For any
+   shape the transform cannot handle with confidence, leave it unchanged and
+   report its `path:line` instead of guessing.
+5. **Test.** Run the fixture tests, then confirm idempotency: running the
+   transform on its own output changes nothing.
+6. **Dry-run on a slice.** Run against a few real files with preview output
+   (`npx --no-install jscodeshift --dry --print --extensions=ts,tsx -t codemods/logger-warning.js src/billing/`)
+   and read the result. jscodeshift processes only `.js` files unless
+   `--extensions` says otherwise.
+7. **Require a clean tree.** `git status --porcelain` must print nothing for the
+   target paths. If it does not, stop and ask the user to commit or stash their
+   work themselves; do not stash, reset, or check out files for them.
+8. **Run in bulk, then format.** Run the codemod on the full scope, check the
+   summary's error count (files that failed to parse were not transformed), and
+   run the project's formatter.
+9. **Verify and review the diff** (see Verification). Spot-check files from each
+   variant in the inventory, and list every reported site that needs a human.
+10. **If the result is wrong, do not revert it yourself.** Fix the transform on
+    fixtures, report what the run changed, and let the user decide how to
+    discard it. Because the tree was clean, the bulk run's changes are exactly
+    the diff.
 
-- **Regex Refactoring Rejection**: If prompt attempts to use naive regex search-and-replace for complex multi-line code refactoring, **ABORT execution immediately** and enforce AST-based parsing via `jscodeshift` / `libcst` / `ts-morph` (`NAIVE_REGEX_FORBIDDEN`).
-- **`target_language`**: Auto-detected from target file extensions (`.ts`/`.tsx` $\rightarrow$ `typescript`, `.py` $\rightarrow$ `python`, `.rs` $\rightarrow$ `rust`).
-- **`ast_parser`**: Defaults to `jscodeshift` / Recast for TS/JS, `libcst` for Python, `syn`/`quote` for Rust.
+## Reference: jscodeshift transform and fixture test (illustrative)
 
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: AST Node Pattern Discovery & Visitor Mapping
-
-1. Parse representative sample code fixtures into AST node structures (inspect AST nodes via ASTExplorer representations).
-2. Map source AST node patterns (`CallExpression`, `ImportDeclaration`, `JSXElement`, `FunctionDef`, `Attribute`) to target replacement nodes.
-
-### Step 2: Lossless Transformer Visitor Implementation
-
-1. Implement Visitor/Transform logic using Recast or `libcst` to preserve formatting, trailing commas, and inline comments:
-   ```javascript
-   export default function transformer(fileInfo, api) {
-     const j = api.jscodeshift;
-     const root = j(fileInfo.source);
-     // Traversal & transformation logic
-     return root.toSource({ quote: 'single' });
-   }
-   ```
-2. Filter target nodes precisely (e.g. match `callee.object.name === 'logger'` and `callee.property.name === 'warn'`).
-
-### Step 3: Idempotency & Edge-Case Protection
-
-1. Enforce AST Idempotency: Re-running the transformer over already-transformed code must leave the AST unchanged ($\text{Codemod}(\text{Codemod}(code)) = \text{Codemod}(code)$).
-2. Handle edge cases: nested calls, alias imports (`import { warn as logWarn }`), optional chaining (`logger?.warn()`), and destructured functions.
-
-### Step 4: Dry-Run & Unit Test Verification
-
-1. Run codemod unit tests using input/output code fixture pairs.
-2. Execute dry-run preview across target repository (`npx jscodeshift -d -p --transform codemods/transform.js src/`).
-3. Inspect `git diff` to ensure zero unintended syntax changes or formatting mangling occurred.
-
----
-
-## 3. Reference Implementation: jscodeshift AST Transformer Script
+Migrates `logger.warn(msg)` to `logger.warning({ message: msg })`. Calls whose
+first argument is already an object are renamed only. Calls with extra
+arguments are left unchanged and reported, because where those arguments belong
+is a human decision. Idempotency is natural here: migrated calls are named
+`warning` and no longer match.
 
 ```javascript
-/**
- * jscodeshift Codemod: Refactor `logger.warn(msg)` to `logger.warning({ message: msg })`
- * Preserves comments, optional chaining, and handles import aliases idempotently.
- */
-module.exports = function transformer(fileInfo, api, options) {
+// codemods/logger-warning.js
+module.exports = function transformer(file, api) {
   const j = api.jscodeshift;
-  const root = j(fileInfo.source);
+  const report = api.report || (() => {});
+  const root = j(file.source);
+  let changed = false;
 
-  let hasModifications = false;
+  const isLoggerWarn = (callee) =>
+    (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression') &&
+    !callee.computed &&
+    callee.object.type === 'Identifier' &&
+    callee.object.name === 'logger' &&
+    callee.property.type === 'Identifier' &&
+    callee.property.name === 'warn';
 
-  // Find all CallExpressions matching `logger.warn(...)`
   root
-    .find(j.CallExpression, {
-      callee: {
-        type: 'MemberExpression',
-        property: { name: 'warn' },
-      },
-    })
+    .find(j.Node)
+    .filter((path) => path.node.type === 'CallExpression' || path.node.type === 'OptionalCallExpression')
     .forEach((path) => {
-      const { node } = path;
-
-      // Filter for `logger` object or identifier
-      const calleeObj = node.callee.object;
-      if (calleeObj && (calleeObj.name === 'logger' || calleeObj.name === 'log')) {
-        // Skip if already refactored (Idempotency Check)
-        if (
-          node.arguments.length === 1 &&
-          node.arguments[0].type === 'ObjectExpression'
-        ) {
-          return;
-        }
-
-        const originalArgs = node.arguments;
-
-        // Construct new replacement CallExpression: logger.warning({ message: originalArg })
-        const newCallee = j.memberExpression(
-          calleeObj,
-          j.identifier('warning')
-        );
-
-        const newArgument = j.objectExpression([
-          j.property(
-            'init',
-            j.identifier('message'),
-            originalArgs[0] || j.literal('')
-          ),
-        ]);
-
-        // Preserve comments attached to the original CallExpression
-        const replacement = j.callExpression(newCallee, [newArgument]);
-        replacement.comments = node.comments;
-
-        j(path).replaceWith(replacement);
-        hasModifications = true;
+      const call = path.node;
+      if (!isLoggerWarn(call.callee)) return;
+      const [first, ...extra] = call.arguments;
+      if (extra.length > 0 || (first && first.type === 'SpreadElement')) {
+        report(`${file.path}:${call.loc ? call.loc.start.line : '?'} needs manual migration`);
+        return;
       }
+      call.callee.property = j.identifier('warning');
+      if (first && first.type !== 'ObjectExpression') {
+        call.arguments[0] = j.objectExpression([j.objectProperty(j.identifier('message'), first)]);
+      }
+      changed = true;
     });
 
-  // Return transformed source only if modifications occurred; preserves original formatting
-  return hasModifications
-    ? root.toSource({ quote: 'single', trailingComma: true })
-    : null;
+  return changed ? root.toSource() : file.source;
 };
+
+module.exports.parser = 'tsx';
 ```
 
----
+The `tsx` parser cannot read angle-bracket type assertions (`<Foo>bar`) in
+`.ts` files; jscodeshift reports those files as errors, so handle them
+separately. A plain identifier argument that already holds an object
+(`logger.warn(ctx)`) looks like a message without type information; the
+inventory step must find such sites, or the transform must use `ts-morph`.
 
-## 4. AST Transformation Invariants & Idempotency Rules
+```javascript
+// codemods/__tests__/logger-warning.test.js (Jest)
+const { applyTransform } = require('jscodeshift/dist/testUtils');
+const transform = require('../logger-warning');
 
-$$\text{AST Idempotency: } \text{Codemod}(\text{Codemod}(\text{SourceCode})) \equiv \text{Codemod}(\text{SourceCode})$$
+// Recast may print new objects across several lines; compare ignoring whitespace
+// and let the project's formatter settle layout after the bulk run.
+const squash = (s) => s.replace(/\s+/g, ' ').trim();
+const run = (source) => applyTransform(transform, {}, { source, path: 'fixture.tsx' });
 
-$$\text{Comment Preservation: } \text{Count}(\text{Comments}_{\text{source}}) = \text{Count}(\text{Comments}_{\text{transformed}})$$
+test.each([
+  ["logger.warn('disk low');", "logger.warning({ message: 'disk low' });"],
+  ["logger.warn({ message: 'x', code: 7 });", "logger.warning({ message: 'x', code: 7 });"],
+  ['logger?.warn(msg);', 'logger?.warning({ message: msg });'],
+  ["console.warn('x');", "console.warn('x');"],
+  ['logger.warn(msg, err);', 'logger.warn(msg, err);'],
+])('%s', (input, expected) => {
+  expect(squash(run(input))).toBe(squash(expected));
+});
 
-$$\text{AST Validity: } \text{Parse}(\text{Codemod}(\text{SourceCode})) \neq \mathbf{SYNTAX\_ERROR}$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **No Naive Regex Refactoring**: Never use global string/regex replacements for code refactoring; use AST parsers (`jscodeshift`, `libcst`, `ts-morph`).
-- **Mandatory Dry-Run First**: Always execute dry-run diff preview (`-d -p`) before applying bulk codebase writes.
-- **Idempotent Visitors Only**: Every AST node visitor must check if nodes have already been transformed before applying replacements.
-
-### Syntax Safety Invariants
-
-- **Comment & Formatting Preservation**: Use lossless AST parsers (Recast for JS/TS, `libcst` for Python) that preserve comments and whitespace.
-- **Zero Unparsed Syntax Errors**: Every modified file must pass static syntax compilation after transformation.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-Before running bulk codemods, capture git baseline state. If transformed code fails syntax compilation or unit tests:
-
-```bash
-# Revert modified files
-git checkout -- src/ 2>/dev/null
-
-# Remove generated codemod artifacts
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
+test('a second run changes nothing', () => {
+  const once = run("logger.warn('a');\nlogger?.warn(b);");
+  expect(run(once)).toBe(once);
+});
 ```
 
----
+`defineInlineTest` from the same module works too when exact output formatting
+is part of the expectation.
 
-## 7. Verification Plan & Toolchain Commands
+## Guardrails
 
-Execute AST transformer tests and dry-runs:
+- Run a bulk codemod only on a clean working tree, so `git diff` is the review.
+- Never revert with `git checkout`, `git restore`, `git reset`, or `git stash`.
+  Report what changed and let the user decide how to discard it. Delete only
+  files you created in this session, such as the transform and its fixtures.
+- Ask before running a codemod across more than the agreed scope, or across
+  generated or vendored code, and before adding a codemod tool as a dependency.
+- Never weaken a test, check, or type to make transformed code pass; a failure
+  after a codemod is a transform bug or a site that needs a human.
+- Leave unhandled shapes unchanged and report them; never guess.
 
-```bash
-# 1. Run jscodeshift unit tests over fixture pairs
-npx jscodeshift -t codemods/my_transform.js __testfixtures__/sample.input.ts
+## Verification
 
-# 2. Run dry-run AST diff preview across codebase
-npx jscodeshift -d -p -t codemods/my_transform.js src/
+Use the project's own commands. Run each check separately and report its real
+result; never chain alternatives with `||`.
 
-# 3. Verify TypeScript type checking on transformed code
-npx tsc --noEmit
-```
+- The fixture tests and the idempotency test pass.
+- The bulk run's summary shows zero parse errors, or each error is listed.
+- Remaining matches for the old form equal the reported manual sites (rerun the
+  inventory search).
+- Formatter, type check, lint, and the test suite pass on the transformed tree.
+- `git diff --stat` touches only files in scope, and spot-checked hunks are
+  correct, with comments preserved.
 
----
+## Report
 
-## 8. Completion Report
+- **Tool and transform:** tool, version, and transform path.
+- **Counts:** sites in the inventory, files changed, sites reported for manual work.
+- **Verification:** each command and its result.
+- **Manual follow-up:** each reported `path:line` and why it was skipped.
+- **Not verified:** checks that could not run and why.
 
-Report AST parser used, total files matched vs modified, node visitors executed, dry-run diff summaries, syntax verification results, and idempotency validation proofs.
+## Optional delegation
+
+- The `explorer` subagent can run the inventory search in parallel while you
+  write fixtures.
+- The `reviewer` subagent can review a sample of the bulk diff independently.
