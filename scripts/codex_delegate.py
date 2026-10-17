@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from validate_content import parse_frontmatter
+from validate_content import is_write_scoped, parse_frontmatter
 
 
 def build_packet(repo_root: Path, agent_name: str, task: str, files: list[str]) -> dict[str, object]:
@@ -34,7 +34,7 @@ def build_packet(repo_root: Path, agent_name: str, task: str, files: list[str]) 
         },
         "task": task,
         "allowed_files": files,
-        "write_mode": "read-only" if "read-only" in role_prompt.casefold() else "scoped",
+        "write_mode": "scoped" if is_write_scoped(fields.get("tools", "")) else "read-only",
         "output_requirements": [
             "evidence-backed findings",
             "exact files, lines, or commands where applicable",

@@ -1,7 +1,8 @@
 <!--
-Read natively by Codex, Cursor, Gemini CLI/Antigravity, Copilot, Aider,
-Windsurf, and Zed. install.sh/install.ps1 symlink CLAUDE.md to this file so
-Claude Code receives the same context without a duplicate source file.
+Project context for AI coding agents. Codex, Cursor, Gemini CLI, Antigravity,
+Copilot, and others read AGENTS.md; Claude Code reads CLAUDE.md. To keep one
+source of truth, CLAUDE.md can contain the single line @AGENTS.md, which
+imports this file. Keep it short: agents load it in every session.
 -->
 
 # What this project is

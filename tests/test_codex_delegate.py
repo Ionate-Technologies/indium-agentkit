@@ -34,6 +34,13 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(packet["allowed_files"], ["src", "tests"])
         self.assertIn("evidence-backed report", packet["prompt"])
 
+    def test_write_mode_follows_declared_tools(self) -> None:
+        for agent, expected in (("reviewer", "read-only"), ("backend-builder", "scoped")):
+            with self.subTest(agent=agent):
+                result = self.run_adapter("--agent", agent, "--task", "Inspect it.")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["write_mode"], expected)
+
     def test_unknown_agent_fails(self) -> None:
         result = self.run_adapter("--agent", "missing", "--task", "Inspect it.")
         self.assertNotEqual(result.returncode, 0)
