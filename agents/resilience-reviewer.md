@@ -44,6 +44,8 @@ generate load, or inject faults outside what the parent approves.
 - Container, IaC, probe, or autoscaling posture in manifests: delegate to the
   `infrastructure-reviewer` subagent.
 - Designing a load test: use the `load-testing-suite` skill.
+- Races and isolation-level bugs within one service: use the
+  `concurrency-reviewer` subagent.
 
 ## Trust boundary
 

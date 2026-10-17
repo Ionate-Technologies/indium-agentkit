@@ -24,6 +24,8 @@ published, or logged, and rewriting history does not un-leak it.
 - General review of code for security flaws: use the `security-review` skill.
 - A placeholder or test fixture that never worked anywhere: confirm with the
   owner that it is not real, then clean it up without rotation.
+- Setting up configuration and secret handling so leaks do not recur: use the
+  `config-and-secrets` skill.
 
 ## Inputs to gather
 

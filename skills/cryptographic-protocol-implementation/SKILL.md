@@ -27,6 +27,8 @@ vetted construction fits, and then follow a published specification exactly.
   `threat-modeling` skill.
 - A key or secret has leaked: use the `secret-leak-response` skill.
 - Mapping encryption to compliance controls: use the `compliance-audit` skill.
+- Sign-in, sessions, password reset, or MFA flows: use the
+  `implement-authentication` skill.
 
 ## Inputs to gather
 

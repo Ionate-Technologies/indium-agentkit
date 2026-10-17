@@ -26,6 +26,8 @@ physical security) cannot be seen in a repository at all.
 - Designing a new system's threat mitigations: use the `threat-modeling` skill.
 - Third-party package licenses and vulnerabilities: use the `dependency-audit` skill.
 - A secret is exposed right now: use the `secret-leak-response` skill.
+- Implementing retention jobs and deletion or export requests: use the
+  `data-retention-and-erasure` skill.
 
 ## Inputs to gather
 

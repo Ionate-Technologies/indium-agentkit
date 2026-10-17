@@ -38,6 +38,8 @@ assigns, and return evidence the parent can re-verify. The workflow follows the
 - A schema change or backfill is undecided: use the `database-architect`
   subagent and the `safe-migration` skill first.
 - The change is frontend work: use the `frontend-builder` subagent.
+- Infrastructure-as-code or Kubernetes changes: use the `infra-builder`
+  subagent.
 
 ## Trust boundary
 

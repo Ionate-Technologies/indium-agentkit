@@ -47,6 +47,8 @@ planning follows the `mobile-release-safety` skill.
 - Web UI or shared component review: use the `frontend-reviewer` subagent.
 - Accessibility of app screens: use the `accessibility-checker` subagent.
 - Application-code vulnerabilities: use the `security-reviewer` subagent.
+- Implementing a mobile feature: use the `mobile-builder` subagent or the
+  `mobile-feature` skill.
 
 ## Trust boundary
 

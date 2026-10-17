@@ -25,6 +25,8 @@ not optional.
 - Deploying or promoting a release: use the `deployment-safety` skill.
 - Writing or hardening the Dockerfile a job builds: use the
   `containerize-service` skill.
+- Artifact signing, provenance, and dependency-confusion defenses: use the
+  `supply-chain-security` skill.
 
 ## Inputs to gather
 

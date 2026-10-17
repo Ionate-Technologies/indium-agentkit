@@ -24,6 +24,8 @@ changes nothing in production without an explicit grant.
 - A credential or secret was exposed: use the `secret-leak-response` skill.
 - A planned release needs gates and rollback: use the `deployment-safety` skill.
 - Writing or fixing a runbook as a follow-up: use the `write-runbook` skill.
+- Repairing corrupted data after the incident is stable: use the
+  `production-data-fix` skill.
 
 ## Inputs to gather
 

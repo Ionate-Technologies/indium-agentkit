@@ -44,6 +44,8 @@ the `review-change` skill.
 - Infrastructure-as-code and manifests: use the `infrastructure-reviewer` subagent.
 - Migration rollout and lock hazards: use the `migration-planner` subagent.
 - Checking the work against acceptance criteria: use the `verifier` subagent.
+- Races, lost updates, and deadlocks in concurrent code: use the
+  `concurrency-reviewer` subagent.
 
 ## Trust boundary
 

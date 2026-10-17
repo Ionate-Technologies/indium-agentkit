@@ -26,6 +26,8 @@ without the user's explicit go-ahead.
 - Rolling the image out to an environment: use the `deployment-safety` skill.
 - A secret has already been baked into a pushed image: use the
   `secret-leak-response` skill first.
+- Kubernetes manifests, probes, and rollout settings for the image: use the
+  `kubernetes-workloads` skill.
 
 ## Inputs to gather
 

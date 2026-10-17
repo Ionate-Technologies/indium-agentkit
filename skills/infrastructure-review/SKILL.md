@@ -25,6 +25,9 @@ production change is ever applied as part of a review.
 - Planning the rollout of an infrastructure change: use the
   `deployment-safety` skill.
 - A secret is already exposed: use the `secret-leak-response` skill.
+- Writing or changing Terraform, Pulumi, or CDK: use the
+  `infrastructure-as-code` skill; for Kubernetes manifests, use the
+  `kubernetes-workloads` skill.
 
 ## Inputs to gather
 

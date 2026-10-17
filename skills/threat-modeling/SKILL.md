@@ -29,6 +29,8 @@ and an owner for what remains.
 - Cloud and infrastructure posture: use the `infrastructure-review` skill.
 - Choosing and implementing ciphers, signatures, or TLS settings: use the
   `cryptographic-protocol-implementation` skill.
+- Implementing the authentication and authorization the model calls for: use
+  the `implement-authentication` and `access-control-design` skills.
 
 ## Inputs to gather
 

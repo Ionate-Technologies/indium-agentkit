@@ -24,6 +24,7 @@ in the notes that the change itself does not show.
 - App store or OTA release notes and checks: use the `mobile-release-safety` skill.
 - General documentation or migration guides beyond the release entry: use the
   `write-documentation` skill.
+- Publishing the package to a registry: use the `publish-library` skill.
 
 ## Inputs to gather
 

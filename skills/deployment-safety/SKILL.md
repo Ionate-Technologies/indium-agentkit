@@ -26,6 +26,9 @@ explicitly approves it.
 - Mobile app store or OTA releases: use the `mobile-release-safety` skill.
 - Pre-merge checks for a change: use the `verify-and-ship` skill.
 - Release readiness audit: delegate to the `release-engineer` subagent.
+- Adding, rolling out, or removing feature flags and kill switches: use the
+  `feature-flag-lifecycle` skill.
+- Changing the infrastructure itself: use the `infrastructure-as-code` skill.
 
 ## Inputs to gather
 

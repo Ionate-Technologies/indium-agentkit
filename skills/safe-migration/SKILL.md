@@ -29,6 +29,8 @@ data or traffic rollback, or an irreversible step, without explicit approval.
   `deployment-safety` skill.
 - Upgrading library versions: use the `upgrade-dependencies` skill.
 - Independent review of the plan: delegate to the `migration-planner` subagent.
+- A one-off correction of bad production rows after a bug: use the
+  `production-data-fix` skill.
 
 ## Inputs to gather
 

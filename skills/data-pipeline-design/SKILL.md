@@ -31,6 +31,10 @@ other), transformation framework (dbt, SQL, Spark, Python), and orchestrator.
 - Test or demo data: use the `synthetic-data-generation` skill.
 - Independent review of a pipeline design: delegate to the `data-engineer`
   subagent.
+- Answering a one-off business question from existing data: use the
+  `analyze-data` skill.
+- Training and shipping a machine-learning model: use the
+  `ml-model-development` skill.
 
 ## Inputs to gather
 

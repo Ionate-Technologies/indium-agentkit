@@ -18,6 +18,8 @@ compiles. Understand each change before choosing between them.
 - Reviewing the merged code for bugs: use the `review-change` skill.
 - Deciding whether to merge or rebase is a team policy question; follow
   `AGENTS.md` or ask.
+- A broken rebase or reset, lost commits, or a bad pushed commit: use the
+  `git-recovery` skill.
 
 ## Inputs to gather
 

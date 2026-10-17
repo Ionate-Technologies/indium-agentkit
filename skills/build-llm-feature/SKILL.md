@@ -24,6 +24,8 @@ evaluation, before tuning prompts. The guidance is provider-agnostic.
 - Exposing tools over the Model Context Protocol: use the
   `mcp-server-development` skill.
 - Coordinating several agents: use the `multi-agent-workflow-design` skill.
+- Search, chunking, embeddings, and permission-filtered retrieval for RAG: use
+  the `build-retrieval` skill.
 
 ## Inputs to gather
 

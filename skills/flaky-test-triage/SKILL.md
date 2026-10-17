@@ -18,6 +18,8 @@ cause, and prove the fix statistically. Retrying until green is not a fix.
 - The test fails every time: use the `systematic-debugging` skill.
 - The whole CI job fails intermittently for infrastructure reasons (runner,
   network, cache): delegate to the `ci-verifier` subagent.
+- Suspected races in the code under test: delegate a review to the
+  `concurrency-reviewer` subagent.
 
 ## Inputs to gather
 

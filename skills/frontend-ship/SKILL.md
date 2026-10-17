@@ -23,6 +23,11 @@ conventions, and ask before inventing a look.
 - The API does not exist yet: use the `api-design` skill, then the `backend-api` skill.
 - A large or ambiguous feature that needs scoping first: use the `plan-change` skill.
 - A measured performance regression: use the `performance-optimization` skill.
+- Native or cross-platform mobile apps: use the `mobile-feature` skill.
+- Translations, plurals, and locale formatting: use the `internationalize-ui`
+  skill.
+- End-to-end journey tests: use the `e2e-test-suite` skill.
+- CORS, CSP, and security headers: use the `browser-security-config` skill.
 
 ## Inputs to gather
 

@@ -22,6 +22,9 @@ comparison of two distinct builds under the same workload.
   `query-optimization` skill.
 - System capacity or behavior under traffic: use the `load-testing-suite` skill.
 - Wrong behavior rather than slow behavior: use the `systematic-debugging` skill.
+- Adding a cache once the bottleneck is proven: use the `add-caching` skill.
+- Memory that grows without bound in a long-running process: use the
+  `memory-leak-investigation` skill.
 
 ## Inputs to gather
 

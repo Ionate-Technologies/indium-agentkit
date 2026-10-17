@@ -1,6 +1,6 @@
 ---
 name: frontend-builder
-description: "Implements one bounded user-interface slice (component, page, form, or client data flow) in the project's existing framework and design system, with tests. Use when the UI behavior, API contract, and file scope are agreed. Edits only assigned paths."
+description: "Implements one bounded web user-interface slice (component, page, form, or client data flow) in the project's existing web framework and design system, with tests. Use when the UI behavior, API contract, and file scope are agreed. Edits only assigned paths."
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
 ---
@@ -38,6 +38,7 @@ parent can re-verify. The workflow follows the `frontend-ship` skill.
 - Accessibility audits: use the `accessibility-checker` subagent.
 - The API does not exist yet: use the `api-designer` and `backend-builder`
   subagents first.
+- Mobile app slices: use the `mobile-builder` subagent.
 
 ## Trust boundary
 

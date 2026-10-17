@@ -61,6 +61,8 @@ dependencies. The method follows the `dependency-audit` skill.
 - Exploitability review of application code: use the `security-reviewer` subagent.
 - Container image and infrastructure posture: use the `infrastructure-reviewer` subagent.
 - A leaked credential: use the `secret-leak-response` skill.
+- Deciding whether to add a new package: use the `evaluate-new-dependency`
+  skill.
 
 ## Trust boundary
 

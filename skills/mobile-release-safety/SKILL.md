@@ -26,6 +26,7 @@ owner approves them.
 - Store "What's New" text or changelogs: use the `release-notes` skill.
 - An independent read-only audit of release config: delegate to the
   `mobile-specialist` subagent.
+- Building or changing the feature itself: use the `mobile-feature` skill.
 
 ## Inputs to gather
 

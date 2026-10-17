@@ -22,6 +22,9 @@ what it does. If behavior must change, that is a separate change.
   inside a refactor.
 - Large mechanical changes across many files (API renames, import moves): use the
   `ast-manipulation-codemods` skill.
+- Tightening static types across a codebase: use the `strengthen-types` skill.
+- Removing a stale feature flag and its dead branch: use the
+  `feature-flag-lifecycle` skill.
 
 ## Inputs to gather
 

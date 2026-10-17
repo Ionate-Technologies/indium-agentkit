@@ -47,6 +47,8 @@ those steps. Drafting the notes themselves is the `release-notes` skill.
 - App store submissions: delegate to the `mobile-specialist` subagent.
 - Dependency vulnerabilities: delegate to the `dependency-auditor` subagent.
 - An active outage: delegate to the `incident-commander` subagent.
+- Classifying public API changes between versions: use the
+  `api-compatibility-checker` subagent.
 
 ## Trust boundary
 

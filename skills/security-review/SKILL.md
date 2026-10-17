@@ -30,6 +30,9 @@ remediation, and it never claims the code is secure or compliant.
 - A credential is already exposed: use the `secret-leak-response` skill first.
 - Readiness against GDPR, SOC 2, HIPAA, or PCI DSS: use the `compliance-audit` skill.
 - General correctness and maintainability review: use the `review-change` skill.
+- Building authentication, a permission model, or browser security headers:
+  use the `implement-authentication`, `access-control-design`, or
+  `browser-security-config` skill.
 
 ## Inputs to gather
 

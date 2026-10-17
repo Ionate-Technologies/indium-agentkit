@@ -28,6 +28,7 @@ a result.
 - Throughput and capacity of a serving endpoint: use the `load-testing-suite` skill.
 - An independent review of an eval design or result: delegate to the
   `llm-evaluator` subagent.
+- Building the retrieval pipeline itself: use the `build-retrieval` skill.
 
 ## Inputs to gather
 

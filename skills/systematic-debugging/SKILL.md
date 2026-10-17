@@ -20,6 +20,10 @@ reproduces and at least one falsifiable hypothesis is on record.
 - An active production incident needs coordination first: use the
   `incident-triage` skill, then return here for root cause.
 - The change is a planned restructuring with no defect: use the `refactor-code` skill.
+- Repairing the data a fixed bug corrupted: use the `production-data-fix`
+  skill.
+- Memory growth in a long-running process: use the `memory-leak-investigation`
+  skill.
 
 ## Inputs to gather
 

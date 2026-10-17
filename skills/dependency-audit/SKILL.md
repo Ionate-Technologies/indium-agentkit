@@ -24,6 +24,8 @@ severity in the report names its source or says `unknown`.
 - Reviewing the project's own code for vulnerabilities: use the
   `security-review` skill.
 - A leaked registry token or credential: use the `secret-leak-response` skill.
+- Deciding whether to add a new package: use the `evaluate-new-dependency`
+  skill.
 
 ## Inputs to gather
 

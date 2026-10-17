@@ -29,6 +29,8 @@ increment is done until the full verification passes.
   `ast-manipulation-codemods` skill to write one.
 - A test fails after an upgrade and the cause is unclear: use the
   `systematic-debugging` skill.
+- Adding a new package rather than upgrading one: use the
+  `evaluate-new-dependency` skill.
 
 ## Inputs to gather
 

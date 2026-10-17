@@ -43,6 +43,7 @@ the `infrastructure-review` skill.
 - CI workflow failures: use the `ci-verifier` subagent.
 - Planning a rollout of the change: use the `release-engineer` subagent or the
   `deployment-safety` skill.
+- Implementing the fixes: use the `infra-builder` subagent.
 
 ## Trust boundary
 

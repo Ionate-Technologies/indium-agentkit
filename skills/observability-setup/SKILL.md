@@ -26,6 +26,8 @@ to an action, and nothing sensitive leaves the process.
   `performance-optimization` skill.
 - Collector, agent, or monitoring infrastructure configuration needs review: use
   the `infrastructure-review` skill.
+- Product analytics events and A/B experiments: use the `product-analytics`
+  skill.
 
 ## Inputs to gather
 

@@ -20,6 +20,9 @@ without running it, and never push or publish without authorization.
 - Release preparation, versioning, and changelogs: use the `release-notes` skill
   and the `release-engineer` subagent.
 - Production deployment: use the `deployment-safety` skill.
+- Publishing a library or SDK to a package registry: use the `publish-library`
+  skill.
+- Repairing a bad Git state before shipping: use the `git-recovery` skill.
 
 ## Inputs to gather
 

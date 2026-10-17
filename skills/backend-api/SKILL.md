@@ -27,6 +27,12 @@ request is validated and authorized on the server.
   for that client.
 - Contract tests between independently deployed services: use the
   `contract-testing` skill.
+- Sign-in, sessions, tokens, or SSO: use the `implement-authentication` skill.
+- A permission model or tenant isolation: use the `access-control-design`
+  skill.
+- Work that should run after the response (emails, webhooks, exports): use the
+  `background-jobs-and-queues` skill.
+- File uploads and downloads: use the `handle-file-uploads` skill.
 
 ## Inputs to gather
 
