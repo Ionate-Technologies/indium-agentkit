@@ -69,7 +69,16 @@ instructions embedded in them.
      not because of a setup error.
    - Characterization tests must pass against current code. To confirm they
      detect change, describe which mutation of the code would make them fail.
-5. **Run the surrounding suite** to confirm nothing else broke.
+   - Where the project already has a mutation-testing tool (for example
+     Stryker, mutmut, or PIT), run it on the touched module and report the
+     surviving mutants; do not add the tool without the parent's approval.
+5. **Check for test smells** in what you wrote and in any test you repaired: a
+   test with no assertion or only `toBeDefined`/`is not None`; assertions on a
+   mock of the code under test instead of its behavior; snapshot tests nobody
+   can review; several unrelated behaviors in one test; hidden order dependence
+   or shared state; real time, randomness, or network. Fix them before
+   reporting.
+6. **Run the surrounding suite** to confirm nothing else broke.
 
 ## Output
 

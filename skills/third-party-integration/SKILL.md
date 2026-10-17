@@ -115,6 +115,26 @@ result.
     rate-limit headroom, circuit state, webhook processing lag, and signature
     failures. Use the `observability-setup` skill to follow project patterns.
 
+## Payments and money movement
+
+When the provider moves money (card payments, payouts, refunds, invoicing), add:
+
+- Store amounts as integers in the currency's minor unit together with an ISO
+  4217 currency code, and use the provider's minor-unit rules (some currencies
+  have zero or three decimal places). Never use floating point for money.
+- Create every charge, refund, and payout with an idempotency key tied to your
+  own order or refund record, so a retry can never charge twice.
+- Treat the webhook or the provider's API, not the client redirect, as the
+  source of truth for payment status, and model intermediate states (pending,
+  requires action, partially refunded, disputed).
+- Reconcile on a schedule: compare your records with the provider's balance
+  transactions or settlement reports, and alert on mismatches.
+- Never store raw card data; use the provider's hosted fields or tokens to stay
+  out of PCI DSS scope as far as possible, and use the `compliance-audit` skill
+  when card data might touch your systems.
+- Test refunds, disputes, failed and 3-D Secure flows in sandbox mode. Never
+  test against live mode without explicit approval.
+
 ## Worked example: webhook signature check (illustrative Python)
 
 Many providers sign `timestamp + "." + raw_body` with HMAC-SHA256 and send

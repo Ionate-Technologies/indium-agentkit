@@ -61,8 +61,11 @@ the code under review unless the user asks for fixes.
    - **Performance:** N+1 queries, unbounded loops or result sets, work inside
      hot paths, missing pagination. Flag only what matters at realistic scale.
    - **Tests:** does a test fail if the new behavior breaks? Bug fixes need a
-     regression test. Tests that assert on mocks of the code under test prove
-     little.
+     regression test. Flag tests that cannot fail: no assertions or only
+     "is defined" checks, assertions on a mock of the code under test, large
+     unreviewed snapshots, or setups so mocked that the real logic never runs.
+     Ask "what one-line bug in the change would every test miss?" If the
+     project has mutation testing, its surviving mutants answer that.
 4. **Verify every finding** before writing it down. Trace the code path, check
    the type, read the caller, or run a focused test or the type checker. If you
    cannot confirm it, drop it or list it as a question. A short list of real

@@ -99,7 +99,19 @@ ambiguous and would change the result.
    - Sampling follows project policy: head sampling in the SDK (parent-based
      ratio) and, if the project runs a collector, tail sampling to keep errors
      and slow traces.
-7. **Alerts.** Prefer symptom-based alerts on user-facing SLOs (error-budget
+7. **SLIs and SLOs.** When the service has none, define them before alerting:
+   - Pick SLIs from what users experience: availability (good requests over
+     valid requests), latency (requests under a threshold), and for pipelines,
+     freshness or correctness. Measure them where users are served (load
+     balancer, gateway, or server spans), excluding health checks and
+     client-caused errors as the project decides.
+   - Propose an SLO target and window (for example 99.9% of requests succeed
+     over 28 days) and the error budget it implies, then have the service
+     owner agree to the numbers. Do not choose targets on the owner's behalf.
+   - Record each SLO with its owner, SLI query, target, window, and what
+     happens when the budget is spent (for example pause risky releases),
+     next to the service's dashboards or runbooks.
+8. **Alerts.** Prefer symptom-based alerts on user-facing SLOs (error-budget
    burn rate) over cause-based ones (CPU, memory, restarts).
    - Every paging alert must be actionable, owned (team or routing label), have
      a severity, and link a runbook and dashboard.
