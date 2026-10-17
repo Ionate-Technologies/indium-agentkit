@@ -1,198 +1,212 @@
 ---
 name: write-documentation
-description: Author, update, or audit project documentation — READMEs, architecture decisions, API references, onboarding guides, and inline doc — from code evidence.
+description: "Write or update project documentation from code evidence: READMEs, tutorials, how-to guides, reference pages, explanations, and architecture decision records, running each documented command or marking it unverified. Use when asked to document a feature, API, CLI, configuration, or design decision, fix stale or broken docs, or write an ADR. Not for onboarding guides (use the onboard-to-codebase skill) or AGENTS.md and CLAUDE.md files (use the init-agent-context skill)."
 ---
 
 # Write Documentation
 
-Author, update, audit, and restructure technical project documentation, README files, Architecture Decision Records (ADRs), API reference guides, OpenAPI schemas, and developer manuals directly from empirical codebase evidence.
+Produce documentation that is true for the code as it is today, written for one
+reader and one purpose. The stance is **evidence over memory**: every fact
+comes from the code, a command you ran, or a cited source, and anything
+unverified is labeled as such.
 
-The skill is **contract-first and evidence-backed**: code snippet verification, relative markdown link validation, public interface contract alignment, audience targeting, and zero un-verified claims are strictly enforced before publishing documentation updates.
+## When to use
 
----
+- A feature, API, CLI, configuration option, or module needs docs, or existing
+  docs are stale, wrong, or broken.
+- A design decision needs an architecture decision record (ADR).
+- A README needs to be written or brought up to date.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- A guide for new contributors to set up and find their way: use the
+  `onboard-to-codebase` skill.
+- `AGENTS.md`, `CLAUDE.md`, or similar agent context files: use the
+  `init-agent-context` skill.
+- Release notes or changelog entries: use the `release-notes` skill.
+- Operational procedures for incidents or maintenance: use the `write-runbook` skill.
+- Designing an API contract before it exists: use the `api-design` skill.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Write an Architecture Decision Record (ADR) explaining why we chose PostgreSQL for event sourcing over MongoDB"*), the agent **must automatically infer and populate** `doc_type`, `doc_target_path`, `target_audience`, and `verify_code_snippets` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "WriteDocumentationContextManifest",
-  "type": "object",
-  "required": ["doc_spec", "formatting_config"],
-  "properties": {
-    "doc_spec": {
-      "type": "object",
-      "required": ["doc_type", "doc_target_path"],
-      "properties": {
-        "doc_type": { 
-          "type": "string", 
-          "enum": ["readme", "architecture_decision_record", "api_reference", "user_guide", "inline_jsdoc_docstrings"],
-          "default": "readme" 
-        },
-        "doc_target_path": { "type": "string" },
-        "title": { "type": "string" }
-      }
-    },
-    "formatting_config": {
-      "type": "object",
-      "required": ["target_audience"],
-      "properties": {
-        "target_audience": { 
-          "type": "string", 
-          "enum": ["end_user", "api_consumer", "core_contributor", "system_operator"],
-          "default": "core_contributor" 
-        },
-        "verify_code_snippets": { "type": "boolean", "default": true },
-        "validate_relative_links": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
+- **Reader and goal:** who reads it (new user, integrator, contributor,
+  operator) and what they need to do or understand.
+- **Existing docs:** location (`README.md`, `docs/`, a site generator such as
+  Docusaurus, MkDocs, Sphinx, or VitePress), style guide, heading and tone
+  conventions, and the ADR directory and numbering if one exists (for example
+  `docs/adr/` or `docs/decisions/`).
+- **Sources of truth:** public signatures and types, CLI `--help` output,
+  configuration schemas and defaults, OpenAPI or GraphQL schemas, tests, and the
+  changelog.
+- **Docs tooling:** markdownlint or Vale configuration, link checker, doc build
+  command, and doctests, from `AGENTS.md`, package scripts, or the `Makefile`.
+
+## Workflow
+
+1. **Pick one doc type** for the reader's need (the Diátaxis types, plus ADRs
+   and READMEs). Do not mix types on one page; link between them instead.
+   - **Tutorial:** a beginner learns by doing one guaranteed-to-work path, with
+     no choices along the way.
+   - **How-to guide:** a competent user reaches a specific goal; numbered steps,
+     real-world variations, no teaching detours.
+   - **Reference:** complete, accurate description of the machinery (API,
+     flags, config keys, errors), structured like the code itself.
+   - **Explanation:** background, design, trade-offs, and why.
+   - **ADR:** one decision, recorded when it is made (template below).
+   - **README:** what the project is and who it is for, a quickstart, where
+     deeper docs live, how to get help and contribute, and the license.
+2. **Extract facts from code.** Read the actual signatures, defaults,
+   environment variables, flags, and error messages, and note the source file
+   for each claim. If code and existing docs disagree, document what the code
+   does and flag the mismatch to the user; it may be a bug.
+3. **Draft in the project's voice.** Match heading case, person, tense,
+   terminology, and formatting of nearby docs. State prerequisites and versions
+   up front. Keep examples minimal and complete, and show expected output.
+4. **Verify examples.** Run each documented command and snippet where it is safe
+   (read-only, local, or in a scratch directory) and compare the output with the
+   doc. Use the project's doc test support where it exists (Python doctest,
+   `cargo test --doc`, Go `Example` functions). Do not run commands that deploy,
+   spend money, need production credentials, or change shared state; mark them
+   unverified in the report, and in the doc if the project has a convention for
+   it. Label pseudo-code as illustrative.
+5. **Check structure and links.** Relative links and anchors resolve, heading
+   levels do not skip, images have alt text, and code fences name their
+   language. Run the project's markdown lint and link checker if configured.
+6. **Keep scope tight.** Change only the docs the task covers. List other stale
+   or broken docs you noticed in the report instead of rewriting them.
+
+## ADR template
+
+Follow the project's existing ADR format if it has one. Otherwise:
+
+```markdown
+# ADR-NNNN: Short decision title
+
+- Status: Proposed | Accepted | Deprecated | Superseded by ADR-NNNN
+- Date: YYYY-MM-DD
+- Deciders: names or roles
+
+## Context
+
+The problem, constraints, and forces that prompted the decision.
+
+## Decision
+
+What we will do, in full sentences ("We will ...").
+
+## Consequences
+
+What becomes easier or harder: costs, risks, and follow-up work.
+
+## Alternatives considered
+
+Each option, and why it was not chosen.
 ```
 
-### Automatic Natural Language Inference & Evidence Rules
+Once accepted, an ADR is not rewritten; a later ADR supersedes it, and only the
+status line of the old one changes.
 
-If no raw JSON payload is provided, apply these defaults and strict documentation rules:
+## Reference: relative link check
 
-- **Empirical Accuracy Rule**: Extract all technical features, performance figures, and compatibility metrics directly from source code and passing test cases. Do NOT invent unverified capabilities.
-- **Audience Alignment**: Match document depth to the intended audience (e.g. high-level setup for end users vs internal module architecture for contributors).
-- **Executable Code Snippets**: Code snippets included in documentation must be runnable against the codebase or explicitly marked as pseudo-code.
-
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Codebase Evidence Harvesting & Fact Extraction
-
-1. Read `AGENTS.md`, source code files, build scripts, OpenAPI specs, and test files.
-2. Extract verified usage examples, configuration parameters, and environment requirements.
-
-### Step 2: Document Structure & Template Selection
-
-Select standard document structure based on `doc_type`:
-- **Architecture Decision Record (ADR)**: Status, Context, Decision, Consequences, Alternatives Considered.
-- **README / User Guide**: Purpose, Quickstart Setup, Features, Configuration, Testing, License.
-- **API Reference**: Endpoint, Method, Headers, Request Body Schema, Response Schema, Error Codes.
-
-### Step 3: Working Code Snippet Verification
-
-1. Test code snippets locally or verify syntax against project compiler/linter.
-2. Ensure command-line snippets reflect actual project scripts (`pnpm test`, `pytest`).
-
-### Step 4: Relative Link & File Path Audit
-
-1. Audit all relative file links (`[filename](../../AGENTS.md)`).
-2. Fix broken anchor tags and missing relative documentation references.
-
-### Step 5: Final Review & Style Compliance
-
-Verify clean GitHub Flavored Markdown (GFM) formatting, consistent heading hierarchy (`#` $\rightarrow$ `##` $\rightarrow$ `###`), and concise technical prose.
-
----
-
-## 3. Reference Implementation: Python Documentation & Link Verifier
+Illustrative. Prefer the project's link checker (for example `lychee --offline`
+or markdown-link-check, if installed). This dependency-free script checks
+inline links and images outside fenced code blocks; it does not handle
+reference-style links or links inside inline code.
 
 ```python
-import os
-import re
-from pathlib import Path
-from typing import List, Tuple
+"""Report relative Markdown links that point to missing files.
 
-def verify_markdown_links(doc_path: Path) -> List[str]:
-    """Verify that relative file links in a markdown file actually exist on disk."""
-    if not doc_path.exists():
-        return [f"File not found: {doc_path}"]
-        
-    content = doc_path.read_text(encoding="utf-8")
-    # Match markdown relative links: [text](#anchor)
-    link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
-    
-    broken_links = []
-    base_dir = doc_path.parent
-    
-    for match in link_pattern.finditer(content):
-        label, link = match.groups()
-        # Skip external http/https links and anchors
-        if link.startswith(("http://", "https://", "mailto:", "#")):
+Usage: python check_links.py README.md docs/guide.md
+"""
+import re
+import sys
+from pathlib import Path
+from urllib.parse import unquote
+
+LINK = re.compile(r'\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+FENCE = re.compile(r"^\s*(`{3}|~{3})")
+EXTERNAL = ("http://", "https://", "mailto:", "tel:", "#")
+
+
+def relative_targets(text):
+    in_fence = False
+    for line in text.splitlines():
+        if FENCE.match(line):
+            in_fence = not in_fence
             continue
-            
-        # Clean relative path
-        target_path = base_dir / link.split("#")[0]
-        if not target_path.exists():
-            broken_links.append(f"Broken link '{label}' -> '{link}' in {doc_path.name}")
-            
-    return broken_links
+        if in_fence:
+            continue
+        for match in LINK.finditer(line):
+            target = match.group(1).strip("<>")
+            if not target.startswith(EXTERNAL):
+                yield target
+
+
+def broken_links(doc):
+    for target in relative_targets(doc.read_text(encoding="utf-8")):
+        path = unquote(target.split("#", 1)[0])
+        if path and not (doc.parent / path).exists():
+            yield target
+
+
+def main(paths):
+    failures = 0
+    for name in paths:
+        doc = Path(name)
+        for target in broken_links(doc):
+            print(f"{doc}: broken link -> {target}")
+            failures += 1
+    return 1 if failures else 0
+
 
 if __name__ == "__main__":
-    doc = Path("README.md")
-    if len(sys.argv) > 1:
-        doc = Path(sys.argv[1])
-        
-    broken = verify_markdown_links(doc)
-    if not broken:
-        print(f"[Documentation Verifier] All relative links in '{doc}' are valid!")
-    else:
-        print(f"[Documentation Verifier] Found {len(broken)} broken links:")
-        for b in broken:
-            print(f" - {b}")
+    sys.exit(main(sys.argv[1:]))
 ```
 
----
+If the project uses markdownlint-cli without a script, quote the glob so the
+tool expands it: `markdownlint "**/*.md" --ignore node_modules`.
 
-## 4. Documentation Invariants & Quality Rules
+## Guardrails
 
-$$\text{Snippet Executability: } \forall s \in \text{CodeSnippets}, \quad \text{SyntaxValid}(s) \lor \text{IsPseudoCode}(s)$$
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work: undo your own doc edits by
+  editing them back, never with `git checkout` on doc paths.
+- Ask before destructive, irreversible, outward-facing, or production actions,
+  including publishing a docs site.
+- Never weaken a test, check, or lint rule to make work pass.
+- Never document planned or unreleased behavior as current; label it as planned
+  if the user wants it included.
+- Do not change source code during a documentation task; report code issues
+  instead.
+- Never paste real secrets, tokens, or personal data into examples; use obvious
+  placeholders.
 
-$$\text{Link Integrity Invariant: } \text{Count}(\text{BrokenRelativeLinks}) \equiv 0$$
+## Verification
 
-$$\text{Heading Hierarchy: } \forall h_k \in \text{Headings}, \quad \text{Level}(h_k) \le \text{Level}(h_{k-1}) + 1$$
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
----
+- Every documented command and snippet was run with matching output, or is
+  listed as unverified with the reason.
+- The doc build (if any), markdown lint, and link check pass for changed files.
+- `git diff --stat` shows only the intended documentation files.
 
-## 5. Guardrails
+## Report
 
-### Operational Restrictions
+- **Files:** created or changed, with doc type and intended reader.
+- **Sources:** the code, schemas, and commands each section is based on.
+- **Verified:** commands and snippets run, with results.
+- **Not verified:** commands not run and why.
+- **Mismatches:** places where code and prior docs disagreed, and what you chose.
+- **Follow-ups:** stale or broken docs noticed outside the scope.
 
-- **No Speculative Features**: Do not document planned or un-implemented capabilities as existing features.
-- **Preserve Project Voice**: Match existing project tone and formatting conventions; avoid blanket structural rewrites unless requested.
-- **Scoped Edits Only**: Do not rewrite unrelated documentation sections or change source code files during a documentation task.
+## Optional delegation
 
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If documentation generation produces incorrect formatting or broken relative links:
-
-```bash
-# Revert modified documentation files
-git checkout -- *.md docs/ 2>/dev/null
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Verify documentation links and code snippets:
-
-```bash
-# 1. Run Python Markdown link verifier script
-python3 scripts/verify_markdown_links.py README.md
-
-# 2. Validate markdown formatting with markdownlint
-npx markdownlint-cli "**.md"
-```
-
----
-
-## 8. Completion Report
-
-Report documentation file created or updated (`README.md`, `ADR-001.md`), target audience addressed, sources of truth used, verified code snippets, broken links fixed, and follow-up documentation recommendations.
+The `doc-writer` subagent can draft or update assigned documentation paths in
+parallel; review its sources and re-run its key commands before accepting the
+draft. The `docs-researcher` subagent can fetch authoritative third-party docs
+for the exact versions in the lockfile when a page depends on them.

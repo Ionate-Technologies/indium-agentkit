@@ -1,243 +1,249 @@
 ---
 name: accessibility-audit
-description: Audit user interfaces for WCAG 2.1/2.2 AA/AAA conformance, ARIA semantics, keyboard operability, screen reader compatibility, and color contrast.
+description: "Audit a web interface against WCAG 2.2 Level AA with automated axe-core scans plus manual keyboard and screen reader passes, mapping every finding to a success criterion with evidence and producing an accessibility-audit-report. Use when asked to audit accessibility, check WCAG, ADA, or Section 508 readiness, or review contrast, focus, ARIA, forms, or screen reader support before a release. Not for building or fixing UI (use the frontend-ship skill)."
 ---
 
 # Accessibility Audit
 
-Audit modern web applications, design systems, and mobile interfaces for WCAG 2.1/2.2 (Level A, AA, AAA) conformance, ARIA semantics, keyboard focus management, screen reader tree compatibility, and mathematical color contrast thresholds.
+Find the barriers that stop people from completing tasks, map each one to a
+WCAG 2.2 success criterion, and back it with evidence. The stance is **scans are
+a starting point, not a verdict**: never claim conformance from automated
+results alone.
 
-The skill is **contract-first and WCAG-validated**: DOM tree landmarks, accessible name algorithms (accName 1.2), focus traps, relative luminance ratios, touch target dimensions, and ARIA live region behaviors are mathematically evaluated and verified before reporting remediation steps.
+## When to use
 
----
+- An audit of pages, flows, or design-system components is requested.
+- A release, redesign, or procurement review needs an accessibility report.
+- Users or testers reported a barrier and the scope of the problem is unknown.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Building or remediating UI: use the `frontend-ship` skill, then re-audit.
+- An independent read-only audit to run in parallel: delegate to the
+  `accessibility-checker` subagent.
+- General UI code review (state, rendering, bundle size): delegate to the
+  `frontend-reviewer` subagent.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Audit the login form and dashboard page for WCAG 2.1 AA compliance including keyboard focus traps and color contrast"*), the agent **must automatically infer and populate** `target_url_or_path`, `conformance_level`, `audit_scope`, and `automated_runner` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AccessibilityAuditContextManifest",
-  "type": "object",
-  "required": ["target_scope", "audit_config"],
-  "properties": {
-    "target_scope": {
-      "type": "object",
-      "required": ["target_url_or_path"],
-      "properties": {
-        "target_url_or_path": { "type": "string" },
-        "component_selector": { "type": "string", "default": "body" },
-        "routes_to_audit": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "audit_config": {
-      "type": "object",
-      "required": ["conformance_level"],
-      "properties": {
-        "conformance_level": { 
-          "type": "string", 
-          "enum": ["WCAG21_A", "WCAG21_AA", "WCAG21_AAA", "WCAG22_AA"],
-          "default": "WCAG21_AA" 
-        },
-        "automated_runner": { 
-          "type": "string", 
-          "enum": ["axe_core_playwright", "pa11y", "lighthouse_ci", "jsdom_accname"],
-          "default": "axe_core_playwright" 
-        },
-        "include_experimental_wcag22": { "type": "boolean", "default": true },
-        "min_touch_target_px": { "type": "integer", "default": 44 }
-      }
-    },
-    "assistive_tech_profile": {
-      "type": "object",
-      "properties": {
-        "screen_readers": { 
-          "type": "array", 
-          "items": { "type": "string", "enum": ["NVDA", "JAWS", "VoiceOver", "TalkBack"] } 
-        },
-        "keyboard_only_nav": { "type": "boolean", "default": true },
-        "prefers_reduced_motion": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
-```
+- **Scope:** routes, components, and critical flows (sign-in, sign-up, checkout,
+  search, primary forms), plus the states to cover: errors, empty results, open
+  dialogs and menus, and narrow viewports.
+- **Target:** WCAG 2.2 AA unless a contract or policy names another (for example
+  WCAG 2.1 AA, EN 301 549, or Section 508, which references WCAG 2.0 AA). WCAG
+  2.2 has been a W3C Recommendation since October 2023.
+- **How to run the app:** dev server command, seed data, and test accounts for
+  authenticated pages.
+- **Existing tooling:** axe in tests (`@axe-core/playwright`, `jest-axe`,
+  `vitest-axe`), lint plugins (`eslint-plugin-jsx-a11y`,
+  `eslint-plugin-vuejs-accessibility`), Storybook's accessibility addon,
+  Lighthouse CI, or pa11y.
+- **Design tokens** for color, focus styles, and spacing.
+- **Assistive technology available:** VoiceOver (macOS, iOS), NVDA (Windows),
+  TalkBack (Android). If none is available, say so in the report.
 
-### Automatic Natural Language Inference & Standards Fallbacks
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and strict compliance rules:
+1. **Scope and baseline.** List every page, flow, and state you will audit and
+   record the commit. Group by flow, because barriers matter where they block a
+   task.
+2. **Automated scan.** Run axe in the project's browser harness (example below)
+   for each state, not only the initial load: open the dialog, trigger the
+   validation errors, then scan. Treat `violations` as candidate findings and
+   `incomplete` ("needs review") results as manual checks. Run lint plugins and
+   any existing Lighthouse or pa11y configuration as extra signals.
+3. **Keyboard pass.** Use only the keyboard through each flow:
+   - Everything is operable (2.1.1) with no trap (2.1.2).
+   - Focus order is logical (2.4.3) and focus is always visible (2.4.7).
+   - Sticky headers, cookie banners, and chat widgets do not hide the focused
+     element (2.4.11 Focus Not Obscured, Minimum).
+   - A skip link or landmarks let users bypass repeated blocks (2.4.1).
+   - Dialogs take focus, close on Escape, and return focus to the trigger.
+   - Focus or input does not trigger an unexpected change of context (3.2.1, 3.2.2).
+4. **Screen reader smoke test.** At least one pairing, such as VoiceOver with
+   Safari or NVDA with Firefox or Chrome. Check page title (2.4.2), page language
+   (3.1.1), landmarks and heading navigation (1.3.1), names, roles, and states of
+   controls (4.1.2), image alternatives (1.1.1), labels and instructions (3.3.2),
+   error identification and suggestions (3.3.1, 3.3.3), and status messages that
+   are announced without moving focus (4.1.3). Without a screen reader, inspect
+   the browser's accessibility tree and list the screen reader pass under Areas
+   not tested.
+5. **Visual and layout checks.** Contrast (see below), use of color (1.4.1),
+   200% text resize (1.4.4), reflow at 320 CSS px width without two-dimensional
+   scrolling (1.4.10), text spacing overrides (1.4.12), content on hover or focus
+   that is dismissible and persistent (1.4.13), orientation (1.3.4), and
+   auto-moving content that can be paused (2.2.2).
+6. **WCAG 2.2 additions.** Check each explicitly; axe automates little of this:
+   - 2.4.11 Focus Not Obscured (Minimum), AA: covered in the keyboard pass.
+   - 2.5.7 Dragging Movements, AA: every drag action (sliders, sortable lists,
+     maps) has a single-pointer alternative.
+   - 2.5.8 Target Size (Minimum), AA: pointer targets are at least 24 by 24 CSS
+     px, or undersized targets are spaced so that a 24 px circle centered on
+     each does not intersect another target or another undersized target's
+     circle. Exceptions: an
+     equivalent control elsewhere, inline links in text, user-agent controls,
+     and essential presentations.
+   - 3.2.6 Consistent Help, A: help mechanisms (contact details, chat, help
+     links) appear in the same relative order on each page that has them.
+   - 3.3.7 Redundant Entry, A: information already entered in the same process
+     is filled in or selectable, unless re-entry is essential or for security.
+   - 3.3.8 Accessible Authentication (Minimum), AA: no cognitive function test
+     such as remembering or transcribing a code without an alternative. Allow
+     paste and password managers. Transcription or puzzle CAPTCHAs need an
+     alternative; object-recognition CAPTCHAs are allowed at AA.
+   - 4.1.1 Parsing was removed in WCAG 2.2. Report markup errors only when they
+     cause a real failure, under 1.3.1 or 4.1.2.
+7. **Verify and rate each finding.** Reproduce it, then record the criterion
+   and level, the element (selector, component, and `path:line` when the source
+   is available), the evidence (axe rule id, keyboard steps, screen reader
+   output, measured contrast), the user impact, and a concrete fix. Rate by
+   effect on the task in this flow, not by axe's per-rule impact label:
+   - **Critical:** blocks a core task for some users (an unlabeled submit
+     button, a keyboard trap in checkout).
+   - **Serious:** major difficulty with a workaround.
+   - **Moderate:** inconvenience that does not stop the task.
+   - **Minor:** best-practice gaps, such as more than one `h1` or a skipped
+     heading level that does not hide structure. A single `h1` per page is a
+     best practice, not a WCAG requirement.
+8. **Write the report** below. Remediate only if asked, then re-run the scan and
+   the manual steps that found each issue.
 
-- **WCAG Level Fallback**: Defaults to `WCAG21_AA` when no explicit standard is specified.
-- **`target_url_or_path`**: Inferred from repository routing files (`src/pages/`, `app/`, or local dev server `http://localhost:3000`).
-- **`automated_runner`**: Defaults to `axe_core_playwright` for headless browser accessibility testing.
+## Reference: axe scan in Playwright
 
----
+Illustrative. Place it where the project keeps browser tests; relative URLs
+need `baseURL` in the Playwright config.
 
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: DOM Landmark & Semantic Tree Inspection
-
-1. Inspect HTML semantic structure: verify landmark elements (`<header>`, `<nav>`, `<main>`, `<footer>`, `<aside>`, `<section>`).
-2. Verify heading hierarchy: ensure exactly one `<h1>` per page, with strict logical descending nesting (`h1` $\rightarrow$ `h2` $\rightarrow$ `h3`). Reject skipped heading levels (`h1` $\rightarrow$ `h4`).
-3. Check table accessibility (`<table>`, `<th> scope="col|row"`, `<caption>`).
-
-### Step 2: Keyboard Operability & Focus Management
-
-1. **Focusability**: Every interactive element (`<button>`, `<a>`, `<input>`, `<select>`, `<textarea>`, custom controls) must be keyboard-focusable (`tabindex="0"` or native elements).
-2. **Focus Visibility**: Verify CSS `:focus-visible` styles are not removed via `outline: none` or `outline: 0` without a prominent fallback indicator (minimum 2px thickness with $3:1$ contrast ratio).
-3. **Focus Traps**: Ensure modal dialogs and dropdown menus trap focus internally while open and restore focus to the trigger element upon closing.
-
-### Step 3: ARIA Attributes & Accessible Name Computation
-
-1. **First Rule of ARIA**: Prefer native HTML5 elements (`<button>` over `<div role="button">`).
-2. **Accessible Name Algorithm (accName 1.2)**: Calculate accessible names for interactive elements:
-   - Check `aria-labelledby` $\rightarrow$ `aria-label` $\rightarrow$ native `<label>` / `alt` $\rightarrow$ text content $\rightarrow$ `title`.
-   - Flag elements missing accessible names (`<button><svg/></button>` without `aria-label`).
-3. **Dynamic State Announcements**: Verify `aria-expanded`, `aria-checked`, `aria-selected`, `aria-invalid`, and `aria-live` regions (`polite` / `assertive`) announce dynamic updates to screen readers.
-
-### Step 4: Mathematical Color Contrast & Luminance Computation
-
-Calculate contrast ratios for all text, controls, and meaningful graphical objects against their backgrounds using the relative luminance formula defined in WCAG 2.1 Success Criterion 1.4.3 & 1.4.11.
-
----
-
-## 3. Reference Implementation: Playwright + Axe-Core Audit Runner
-
-```typescript
+```ts
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { writeFileSync } from 'fs';
 
-export interface AuditResult {
-  url: string;
-  violationsCount: number;
-  criticalViolations: Array<{
-    id: string;
-    impact: string;
-    description: string;
-    helpUrl: string;
-    nodes: number;
-  }>;
-}
+const WCAG22_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 
-export async function runAccessibilityAudit(
-  pageUrl: string,
-  outputPath = 'accessibility-report.json'
-): Promise<AuditResult> {
-  const browser = await test.createPage();
-  await browser.goto(pageUrl, { waitUntil: 'networkidle' });
+test('checkout has no detectable WCAG 2.2 AA violations', async ({ page }, testInfo) => {
+  await page.goto('/checkout');
+  await expect(page.getByRole('main')).toBeVisible();
 
-  // Run Axe-core WCAG 2.1 AA & AAA checks
-  const axeResults = await new AxeBuilder({ page: browser })
-    .withTags(['wcag2a', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'])
-    .disableRules(['color-contrast-enhanced']) // Enable standard 4.5:1 AA ratio
+  const results = await new AxeBuilder({ page }).withTags(WCAG22_AA).analyze();
+  await testInfo.attach('axe-results', {
+    body: JSON.stringify(results, null, 2),
+    contentType: 'application/json',
+  });
+  expect(results.violations).toEqual([]);
+});
+
+test('payment dialog has no detectable violations when open', async ({ page }) => {
+  await page.goto('/checkout');
+  await page.getByRole('button', { name: 'Add card' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+
+  const results = await new AxeBuilder({ page })
+    .include('[role="dialog"]')
+    .withTags(WCAG22_AA)
     .analyze();
-
-  const formattedViolations = axeResults.violations.map((v) => ({
-    id: v.id,
-    impact: v.impact || 'minor',
-    description: v.description,
-    helpUrl: v.helpUrl,
-    nodes: v.nodes.length,
-  }));
-
-  const summary: AuditResult = {
-    url: pageUrl,
-    violationsCount: axeResults.violations.length,
-    criticalViolations: formattedViolations,
-  };
-
-  writeFileSync(outputPath, JSON.stringify(axeResults, null, 2));
-  console.log(`[A11y Audit] Found ${summary.violationsCount} violations on ${pageUrl}. Report saved to ${outputPath}.`);
-
-  return summary;
-}
+  expect(results.violations).toEqual([]);
+});
 ```
 
----
+## Contrast
 
-## 4. WCAG Mathematical Formulas & Contrast Invariants
+Compute contrast from relative luminance, or use a tool that does:
 
-### 1. Relative Luminance ($L$)
-Relative luminance of any point in a color space:
+1. For each sRGB channel, take the 8-bit value divided by 255 as c. Linearize:
+   if c is at most 0.04045, the linear value is c / 12.92; otherwise it is
+   ((c + 0.055) / 1.055) ^ 2.4. Older WCAG text uses 0.03928; no 8-bit value
+   falls between the two thresholds.
+2. L = 0.2126 × R + 0.7152 × G + 0.0722 × B, using the linear values.
+3. Ratio = (L1 + 0.05) / (L2 + 0.05), where L1 is the lighter color.
 
-$$L = 0.2126 \cdot R + 0.7152 \cdot G + 0.0722 \cdot B$$
+Thresholds:
 
-Where $R, G, B$ are normalized RGB components:
+- 4.5:1 for normal text (1.4.3, AA).
+- 3:1 for large text: at least 18 pt (24 CSS px) regular or 14 pt (about
+  18.7 CSS px) bold (1.4.3, AA).
+- 3:1 for user interface components, their states and focus indicators, and
+  graphics needed to understand content (1.4.11, AA).
+- 7:1 for normal text and 4.5:1 for large text at AAA (1.4.6), only when the
+  target requires AAA.
+- Disabled controls, pure decoration, and logos are exempt.
 
-$$C_{\text{sRGB}} = \frac{C_{\text{8bit}}}{255}$$
+For example, `#767676` on white is 4.54:1 and passes for normal text. Measure
+text over images, gradients, or translucent layers at the worst point.
 
-$$C = \begin{cases} \frac{C_{\text{sRGB}}}{12.92}, & \text{if } C_{\text{sRGB}} \le 0.04045 \\ \left( \frac{C_{\text{sRGB}} + 0.055}{1.055} \right)^{2.4}, & \text{if } C_{\text{sRGB}} > 0.04045 \end{cases}$$
+## Guardrails
 
-### 2. Color Contrast Ratio ($CR$)
+- Audit only by default. Do not change source files unless asked; when asked,
+  revert or delete only files you created or changed in this session.
+- Ask before destructive, irreversible, outward-facing, or production actions.
+  Run scans against local or staging environments, and never submit real forms
+  that send email, charge cards, or change production data.
+- Never weaken a test, check, or threshold to make work pass, including
+  disabling axe rules or excluding regions without a recorded reason.
+- Never claim WCAG conformance from automated tools. Automated rules can fully
+  test only a minority of success criteria; say which criteria were checked
+  manually and which were not tested.
+- Do not paste personal data from test accounts into the report.
 
-$$CR = \frac{L_1 + 0.05}{L_2 + 0.05}$$
+## Verification
 
-Where $L_1$ is the relative luminance of the lighter color, and $L_2$ is the relative luminance of the darker color.
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
-### 3. WCAG Threshold Invariants
+- The axe tests run and their results are attached or summarized per state.
+- Each reported finding was reproduced at least once and cites a criterion.
+- Every criterion in the target is marked pass, fail, not applicable, or not
+  tested in the conformance summary.
+- After remediation, the scan and the manual steps that found each issue pass.
 
-$$\text{Normal Text (AA): } CR \ge 4.5:1$$
+## Report
 
-$$\text{Large Text / UI Controls (AA): } CR \ge 3.0:1$$
+Return the audit in this structure. Save it where the project keeps such
+documents (for example `docs/accessibility/`), or return it in the conversation
+if the user did not ask for a file. Never write it into a templates directory.
 
-$$\text{Enhanced Contrast (AAA): } CR \ge 7.0:1$$
+<!-- handoff: accessibility-audit-report -->
+```markdown
+# Accessibility audit report
 
-$$\text{Touch Target Dimensions (WCAG 2.2 AA): } W \ge 24\text{px}, H \ge 24\text{px} \quad (\text{Recommended: } 44\text{px} \times 44\text{px})$$
+## Scope
 
----
+Routes, components, flows, and states audited; commit; WCAG version and level;
+tools, browsers, and assistive technology used.
 
-## 5. Guardrails
+## Conformance summary
 
-### Operational Restrictions
+| Criterion | Level | Result | Notes |
+| --- | --- | --- | --- |
+| 2.5.8 Target Size (Minimum) | AA | fail | Icon buttons in the toolbar are 20 by 20 px. |
 
-- **Audit Only by Default**: Do not automatically rewrite component source files unless explicitly requested; produce a structured remediation report first.
-- **No False Conformance Claims**: Never claim 100% WCAG conformance based solely on automated tools. Automated tools catch ~40% of accessibility issues; manual screen reader testing is required.
-- **Outline Removal Protection**: Never allow `outline: none` or `outline: 0` in CSS without explicit custom `:focus-visible` styles.
+## Findings
 
----
+Grouped as Critical, Serious, Moderate, and Minor. Each finding: issue,
+criterion, element or `path:line`, evidence, user impact, remediation.
 
-## 6. Atomic Failure Recovery & Rollback Handler
+## Areas not tested
 
-If accessibility audit scripts fail or produce unexpected JSDOM errors:
+Pages, states, assistive technology, or criteria not covered, and the risk.
 
-```bash
-# Clean up temporary audit reports
-rm -f accessibility-report.json temp-axe-results.json 2>/dev/null
+## Handoff
 
-# Revert any transient test page modifications
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
+**Changed contract:** none for an audit, or the remediation changes made.
+
+**Files / systems affected:** routes, components, and tokens involved.
+
+**Evidence and tests:** scans, manual passes, and their results.
+
+**Risks / rollback:** risks of the proposed fixes.
+
+**What the next agent needs:** remediation priorities and open questions.
 ```
 
----
+## Optional delegation
 
-## 7. Verification Plan & Toolchain Commands
-
-Execute accessibility audit suite:
-
-```bash
-# 1. Run Playwright + Axe-core automated accessibility test suite
-npx playwright test tests/a11y/
-
-# 2. Run Pa11y CLI audit against target route
-npx pa11y http://localhost:3000 --standard WCAG2AA
-
-# 3. Validate HTML semantics using vnu-jar / W3C HTML validator
-npx html-validate "src/**/*.html"
-```
-
----
-
-## 8. Completion Report
-
-Report target URLs/components audited, WCAG conformance level assessed (e.g. WCAG 2.1 AA), violation count grouped by severity (Critical, Serious, Moderate, Minor), exact element selectors, contrast ratio calculations, keyboard focus trap findings, screen reader accessibility status, and prioritized remediation recommendations.
+The `accessibility-checker` subagent can audit separate routes or components in
+parallel and return findings mapped to criteria. Reproduce each of its findings
+before including it in the report.

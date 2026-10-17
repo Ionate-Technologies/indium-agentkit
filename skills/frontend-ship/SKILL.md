@@ -1,480 +1,310 @@
 ---
 name: frontend-ship
-description: Build accessible, typed, expressive, glassmorphic, and 3D frontend features end to end.
+description: "Build or change a user-facing frontend feature (page, component, form, or client data flow) in the project's existing framework and design system, with the states it needs, WCAG 2.2 AA accessibility, and tests. Use when implementing UI from an agreed brief or API contract in Next.js, Remix or React Router, Vite, Vue or Nuxt, SvelteKit, or Angular apps. Not for UI review (delegate to the frontend-reviewer subagent) or accessibility audits (use the accessibility-audit skill)."
 ---
 
 # Frontend Ship
 
-Implement user-facing interface features from agreed briefs and API contracts through deterministic, accessible, and visual-first UI engineering.
+Ship a UI feature that looks and behaves like the rest of the app, handles its
+real states, and passes the project's checks. The stance is **the project's
+stack and design system first**: reuse what exists, follow existing directory
+conventions, and ask before inventing a look.
 
-The default target stack is **Next.js App Router (React Server Components & Client Components)**, **TypeScript 5+**, **CSS Custom Properties (Design Tokens)**, and **Playwright / Vitest** seam testing. Before writing code, inspect the local repository to inherit existing framework conventions, routing structures, styling systems, and test harnesses.
+## When to use
 
----
+- A page, component, form, or client-side data flow must be built or changed,
+  and its behavior and API contract are known or can be settled with the user.
+- An existing screen needs missing loading, empty, error, or unauthorized states.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Reviewing finished UI work: delegate to the `frontend-reviewer` subagent.
+- A WCAG audit of existing pages: use the `accessibility-audit` skill.
+- The API does not exist yet: use the `api-design` skill, then the `backend-api` skill.
+- A large or ambiguous feature that needs scoping first: use the `plan-change` skill.
+- A measured performance regression: use the `performance-optimization` skill.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON-RPC context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Build a glassmorphic user profile card at `/settings/profile`"*), the agent **must automatically infer and populate** `feature_name`, `target_route`, `rendering_mode`, `aesthetic_mode`, and `token_source` from the user's text!
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "FrontendShipContextManifest",
-  "type": "object",
-  "required": ["component_spec", "design_system_context"],
-  "properties": {
-    "component_spec": {
-      "type": "object",
-      "required": ["feature_name", "target_route", "rendering_mode"],
-      "properties": {
-        "feature_name": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-        "target_route": { "type": "string", "pattern": "^/(?!.*(?:^|/)\\.\\.?(?:/|$))[a-zA-Z0-9/_.\\[\\]()-]+$" },
-        "rendering_mode": { "type": "string", "enum": ["rsc_with_client_boundary", "client_only", "server_only"] }
-      }
-    },
-    "design_system_context": {
-      "type": "object",
-      "required": ["aesthetic_mode", "token_source"],
-      "properties": {
-        "aesthetic_mode": { "type": "string", "enum": ["minimalist", "expressive", "glassmorphic", "spatial_3d"] },
-        "token_source": { "type": "string" }
-      }
-    },
-    "interface_contract": {
-      "type": "object",
-      "required": ["api_endpoint", "http_method", "response_schema"],
-      "properties": {
-        "api_endpoint": { "type": "string" },
-        "http_method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-        "response_schema": { "type": "object" },
-        "auth_required": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
-```
+- **Behavior:** user goal, acceptance criteria, and which states apply (brief,
+  ticket, or a feature-brief handoff).
+- **Contract:** endpoints, response shapes, auth, and error codes, or the props
+  the component receives.
+- **Stack:** framework, router, and version from `package.json` and config files
+  (see the table below).
+- **Design system:** component library (for example `components/ui/`, shadcn/ui,
+  MUI, Vuetify, Angular Material), token source (CSS custom properties, Tailwind
+  config or `@theme`, theme files), Storybook stories, icons, and fonts.
+- **Data and state conventions:** the existing API client, data library
+  (TanStack Query, SWR, Apollo), stores, form library, and validation schemas.
+- **Tests and budgets:** component and end-to-end harnesses, and any bundle or
+  Lighthouse budget (size-limit, bundlesize, Lighthouse CI). Commands come from
+  `AGENTS.md`, `CLAUDE.md`, package scripts, or the `Makefile`.
 
-### Automatic Natural Language Inference & Path Traversal Validation Rules
-If no raw JSON payload is provided, apply these defaults and safety checks:
-- **`feature_name`**: Extracted from prompt or derived from target route (e.g. `/profile` $\rightarrow$ `user-profile`).
-- **`target_route`**: Extracted from prompt URL or defaults to `/components/<feature_name>`.
-- **Path Traversal Protection**: `target_route` MUST NOT contain path traversal segments (`.` or `..`). The agent must normalize paths and **ABORT execution immediately** if traversal attempt is detected.
-- **`rendering_mode`**: Defaults to `rsc_with_client_boundary`.
-- **`aesthetic_mode`**: Inferred from prompt keywords (`glassmorphic`, `minimalist`, `expressive`, `spatial_3d`). Defaults to `glassmorphic`.
-- **`token_source`**: Detects local `styles/globals.css`, `app/globals.css`, or creates CSS custom properties in `components/ui/${FEATURE_NAME}/styles.css`.
+| Signal | Stack | Where data and secrets belong |
+| --- | --- | --- |
+| `next`, routes under `app/` or `src/app/` | Next.js App Router | Server Components, route handlers, server actions; `'use client'` only at interactive leaves |
+| `next`, routes under `pages/` or `src/pages/` | Next.js Pages Router | `getServerSideProps` or `getStaticProps`, API routes |
+| `@remix-run/*`, or `@react-router/dev` with `react-router.config.ts` | Remix or React Router framework mode | Route `loader` and `action` functions |
+| `vite.config.*` with no server framework | Vite single-page app | The app's authenticated API client; secrets stay on the backend |
+| `nuxt`, `nuxt.config.*` | Nuxt | `useFetch` or `useAsyncData`, `server/api` routes; private `runtimeConfig` keys |
+| `@sveltejs/kit`, `svelte.config.js` | SvelteKit | `+page.server.ts` load and form actions; `$env/static/private` |
+| `@angular/core`, `angular.json` | Angular | `HttpClient` services and interceptors; follow standalone or NgModule style as the project does |
 
----
+A Next.js app can use both routers; follow the one the target route lives in.
 
-## 2. Deterministic State Machine Execution Flow
+## Workflow
 
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
+1. **Orient.** Read `AGENTS.md`, `package.json`, the framework config, and two
+   sibling features similar to the target. Note where routes, components, hooks,
+   styles, and tests live, and place new files beside their siblings. Do not
+   create new top-level directories or scaffold guessed paths.
+2. **Settle the design source.**
+   - With a design system: reuse its components and tokens. Add a token only when
+     no fitting one exists, in the token source, and call it out in the report.
+   - Without one: ask the user before choosing an aesthetic. Offer one or two
+     options derived from the app's current styles; never default to a novelty
+     look. Glassmorphic or 3D effects are only for an explicit request with no
+     design system to follow; use the corrected recipes in
+     `references/visual-styles.md` in this skill's directory, which keep AA
+     contrast, reduced-motion, and fallback rules.
+3. **Place the data and auth boundary.**
+   - Fetch on the server where the framework allows it (row in the table above),
+     and pass only serializable, non-secret data to client components.
+   - In the browser, call the app's own endpoints through its authenticated
+     client (session cookies or the existing interceptor).
+   - Never pass API keys or bearer tokens as props, URL parameters, or public
+     environment variables (`NEXT_PUBLIC_`, `VITE_`, `NUXT_PUBLIC_`, SvelteKit
+     `PUBLIC_`). Enforce authorization on the server; hiding a button is not
+     access control.
+4. **Choose the states that apply,** and skip the rest with a reason:
+   - **Loading:** skeleton or placeholder sized like the final content so the
+     layout does not shift.
+   - **Empty:** says what is missing and offers the next action.
+   - **Error with recovery:** plain-language message without raw server text or
+     stack traces, a retry for transient failures, and preserved form input.
+   - **Success:** the data, or a confirmation for a mutation.
+   - **Unauthorized (401):** route to sign-in through the app's auth flow.
+     **Forbidden (403):** explain the missing access and how to request it.
+   - **Retries:** automatic only for idempotent reads that failed transiently
+     (network error, 5xx, or 429, honoring `Retry-After` when sent), with capped
+     exponential backoff, jitter, a small attempt limit, and cancellation on
+     unmount. Never auto-retry a mutation unless the API supports idempotency
+     keys. If the data library already retries (TanStack Query does by default),
+     configure it instead of adding a second loop.
+5. **Implement.**
+   - Type props and responses; validate untrusted input with the project's
+     schema library where it has one.
+   - Effects depend on stable primitive values, never on array or object
+     identity created during render. Abort in-flight requests, clear timers, and
+     unsubscribe in cleanup.
+   - Semantic HTML first, ARIA only where native elements fall short. Every
+     control has an accessible name; forms have labels, `autocomplete` values,
+     and errors linked with `aria-describedby`.
+   - Keyboard: all operable, logical order, visible focus that sticky headers do
+     not cover; Escape closes overlays and focus returns to the trigger.
+   - Announce async changes through one always-mounted `role="status"` region;
+     use `role="alert"` for errors, never nested inside another live region.
+   - Contrast at least 4.5:1 for text and 3:1 for large text, icons, and control
+     boundaries; targets at least 24 by 24 CSS px; no color-only meaning; honor
+     `prefers-reduced-motion`; allow paste and password managers at sign-in.
+   - No `dangerouslySetInnerHTML`, `v-html`, `{@html}`, or `[innerHTML]` with
+     unsanitized input. No mock data in production paths; fixtures live in tests
+     and stories.
+6. **Test at public seams.** Component tests cover each implemented state and
+   the main interaction, querying by role and label. Add an end-to-end test for
+   the main path when the project has a harness. Mock the network at the
+   boundary (MSW, `page.route`), not the component under test. Run the project's
+   axe check if it has one.
+7. **Check performance.** Core Web Vitals "good" thresholds are LCP at most
+   2.5 s, INP at most 200 ms, and CLS at most 0.1, measured at the 75th
+   percentile of real page loads. Lab tools approximate them: Lighthouse reports
+   LCP and CLS, and INP needs real or scripted interactions. Give images
+   dimensions, do not lazy-load the LCP image, reserve space for async content,
+   code-split heavy client-only widgets, and keep event handlers short. Compare
+   bundle output before and after against the project's budget; without a
+   budget, report the delta rather than inventing one.
+8. **Inspect the diff** for scope creep, `console.log`, secrets, hard-coded
+   colors or spacing that bypass tokens, and generated files, then report.
 
-### Step 1: Context Ingestion & Parameter Resolution
-1. Check if raw `FrontendShipContextManifest` JSON is provided. Validate `target_route` for zero traversal segments (`.` or `..`).
-2. If JSON is missing, parse the user's natural language request and apply the **Automatic Natural Language Inference Rules** to build the parameter context in memory.
-3. Check if `interface_contract` is present:
-   - **Present**: Component operates in API Integration Mode (fetching from `api_endpoint`).
-   - **Omitted**: Component operates in Pure UI Design Mode (rendering via typed props and realistic mock data).
+## Reference: client-side read with states (React)
 
-### Step 2: Component Topology & Directory Scaffolding
-1. Inspect `package.json` to confirm framework conventions (Next.js App Router vs Page Router, Vite, etc.).
-2. Resolve the active App Router root dynamically (`src/app` vs `app`) before scaffolding:
-   ```bash
-   if [ -d "src/app" ]; then
-     APP_ROOT="src/app"
-   elif [ -d "app" ]; then
-     APP_ROOT="app"
-   else
-     APP_ROOT="src/app"
-   fi
-
-   TARGET_ROUTE="<target_route>"
-   FEATURE_NAME="<feature_name>"
-   mkdir -p "components/ui/${FEATURE_NAME}" "${APP_ROOT}${TARGET_ROUTE}" "tests/e2e/${FEATURE_NAME}"
-   ```
-3. Establish Server Component (RSC) vs Client Component (`'use client'`) boundaries:
-   - Keep data fetching and server secrets inside RSC modules.
-   - Restrict `'use client'` strictly to interactive event handlers, React state (`useState`, `useReducer`), and DOM/canvas animation hooks.
-
-### Step 3: Design System Tokens & Aesthetic Ingestion
-1. Import or declare CSS Custom Properties matching the target `aesthetic_mode`:
-
-```css
-/* Core Visual Design Tokens Contract */
-:root {
-  /* 1. Surface & Color System (HSL Curated - WCAG AAA Compliant >= 7:1) */
-  --color-bg-base: hsl(222, 47%, 10%);
-  --color-surface-card: hsl(217, 33%, 15%);
-  --color-surface-hover: hsl(217, 33%, 20%);
-  --color-surface-active: hsl(217, 33%, 24%);
-  --color-border-hairline: rgba(255, 255, 255, 0.08);
-  --color-border-subtle: hsl(217, 24%, 27%);
-  --color-text-primary: hsl(210, 40%, 98%);
-  --color-text-secondary: hsl(215, 25%, 82%);
-  --color-text-muted: hsl(215, 20%, 78%); /* WCAG AAA >= 7:1 ratio against bg-base */
-
-  /* 2. Expressive Brand & Aurora Glow Gradients */
-  --color-brand-primary: hsl(210, 100%, 56%);
-  --color-brand-hover: hsl(210, 100%, 48%);
-  --color-brand-accent: hsl(270, 95%, 65%);
-  --gradient-brand-primary: linear-gradient(135deg, hsl(210, 100%, 56%) 0%, hsl(270, 95%, 65%) 100%);
-  --gradient-aurora-glow: radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.25) 0%, rgba(147, 51, 234, 0.15) 50%, transparent 100%);
-
-  /* 3. Glassmorphism & Depth System */
-  --glass-bg: rgba(23, 32, 54, 0.55);
-  --glass-bg-hover: rgba(30, 41, 68, 0.68);
-  --glass-border: 1px solid rgba(255, 255, 255, 0.12);
-  --glass-backdrop: blur(16px) saturate(180%);
-
-  /* Multi-Layered Elevation Shadows */
-  --elevation-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 0 rgba(255, 255, 255, 0.15);
-  --elevation-glow-brand: 0 0 25px -5px rgba(59, 130, 246, 0.4);
-
-  /* 4. Fluid Typography Scale */
-  --font-family-base: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-size-xs: clamp(0.75rem, 0.7rem + 0.25vw, 0.875rem);
-  --font-size-sm: clamp(0.875rem, 0.8rem + 0.35vw, 1rem);
-  --font-size-md: clamp(1rem, 0.9rem + 0.5vw, 1.25rem);
-  --font-size-lg: clamp(1.25rem, 1.1rem + 0.75vw, 1.75rem);
-
-  /* Spring Physics & Micro-Animation Curves */
-  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
-  --duration-fast: 150ms;
-  --duration-normal: 250ms;
-}
-
-.glass-card {
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-backdrop);
-  -webkit-backdrop-filter: var(--glass-backdrop);
-  border: var(--glass-border);
-  box-shadow: var(--elevation-glass);
-  border-radius: 0.875rem;
-  transition: transform var(--duration-normal) var(--ease-spring),
-              background var(--duration-normal) var(--ease-spring);
-}
-
-.glass-card:hover {
-  background: var(--glass-bg-hover);
-  transform: translateY(-3px) scale(1.01);
-}
-```
-
-### Step 4: 7-State UI View Synthesis
-Implement explicit, observable UI views for all 7 mandatory states:
-1. `INITIAL`: Baseline idle component state.
-2. `LOADING`: Skeleton fallback layout with `aria-busy="true"`.
-3. `SUCCESS`: Interactive data view with semantic HTML landmarks.
-4. `EMPTY`: Actionable zero-data fallback state with action buttons.
-5. `ERROR`: Non-sensitive, user-actionable error state with recovery controls.
-6. `RETRY`: Observable connection retry state with deterministic 1000ms backoff.
-7. `PERMISSION_DENIED`: 403 / Unauthenticated fallback view.
-
-### Step 5: WCAG 2.1 AAA Accessibility & Focus Control
-1. Ensure complete keyboard operability (`Tab`, `Shift+Tab`, `Enter`, `Space`, `Escape`).
-2. Implement focus trap management inside overlay modals and visible focus rings (`:focus-visible`).
-3. Add live region status updates (`aria-live="polite"`).
-
-### Step 6: Verification, Type Audit & Test Execution
-1. Run static analysis and type checks: `npx --no-install tsc --noEmit`.
-2. Run linter: `npm run lint`.
-3. Execute unit/integration tests: `npm run test` or `npx --no-install vitest run`.
-4. Execute Playwright E2E browser seam assertions: `npx --no-install playwright test`.
-
----
-
-## 3. Reference Implementation: 7-State Accessible Component Pattern
+Illustrative. Use it when data must load in the browser (a single-page app or
+a client-only interaction); in server-rendering frameworks, fetch on the server
+first. Swap in the project's API client, data library, and design-system
+components.
 
 ```tsx
-'use client';
+'use client'; // Only needed in React Server Component frameworks.
 
-import React, { useState, useEffect, useRef } from 'react';
+import { useEffect, useId, useState } from 'react';
 
-export type UIViewState = 'INITIAL' | 'LOADING' | 'SUCCESS' | 'EMPTY' | 'ERROR' | 'RETRY' | 'PERMISSION_DENIED';
+type Order = { id: string; label: string };
 
-interface DataRecord {
-  id: string;
-  title: string;
-  category: string;
-  metric: string;
+type View =
+  | { status: 'loading' }
+  | { status: 'success'; orders: Order[] }
+  | { status: 'empty' }
+  | { status: 'unauthorized' }
+  | { status: 'forbidden' }
+  | { status: 'error' };
+
+class HttpError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`HTTP ${status}`);
+    this.status = status;
+  }
 }
 
-interface ComponentProps {
-  apiEndpoint?: string;
-  authToken?: string;
-  initialData?: DataRecord[];
-}
+const MAX_AUTO_RETRIES = 2;
 
-export function ExpressiveFeatureContainer({ apiEndpoint, authToken, initialData }: ComponentProps) {
-  const [viewState, setViewState] = useState<UIViewState>('INITIAL');
-  const [data, setData] = useState<DataRecord[]>(initialData || []);
-  const [errorMessage, setErrorMessage] = useState<string>('');
-  const retryButtonRef = useRef<HTMLButtonElement>(null);
+const STATUS_TEXT: Record<View['status'], string> = {
+  loading: 'Loading orders…',
+  success: '',
+  empty: 'No orders yet.',
+  unauthorized: 'Sign in to see your orders.',
+  forbidden: 'You do not have access to these orders.',
+  error: '',
+};
 
-  const fetchData = async (signal?: AbortSignal) => {
-    if (!apiEndpoint) {
-      if (initialData && initialData.length > 0) {
-        setData(initialData);
-        setViewState('SUCCESS');
-      } else {
-        setData([
-          { id: '1', title: 'Aurora Visual Engine', category: 'Design', metric: '60 FPS' },
-          { id: '2', title: 'Glassmorphic Card Depth', category: 'Aesthetic', metric: '100%' },
-        ]);
-        setViewState('SUCCESS');
-      }
-      return;
-    }
-
-    if (!authToken) {
-      setViewState('PERMISSION_DENIED');
-      return;
-    }
-
-    setViewState('LOADING');
-    try {
-      const response = await fetch(apiEndpoint, {
-        signal,
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (response.status === 401 || response.status === 403) {
-        setViewState('PERMISSION_DENIED');
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(`Server responded with status ${response.status}`);
-      }
-
-      const result: DataRecord[] = await response.json();
-      if (!Array.isArray(result) || result.length === 0) {
-        setData([]);
-        setViewState('EMPTY');
-      } else {
-        setData(result);
-        setViewState('SUCCESS');
-      }
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        return;
-      }
-      const message = err instanceof Error ? err.message : 'An unexpected error occurred.';
-      setErrorMessage(message);
-      setViewState('ERROR');
-    }
-  };
+// Render as <OrderList key={customerId} customerId={customerId} /> so a
+// different customer starts again from the loading state.
+export function OrderList({ customerId }: { customerId: string }) {
+  const headingId = useId();
+  const [view, setView] = useState<View>({ status: 'loading' });
+  const [reloadCount, setReloadCount] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchData(controller.signal);
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    // Drop results that arrive after this effect was cleaned up.
+    const commit = (next: View) => {
+      if (!controller.signal.aborted) setView(next);
+    };
 
+    async function load(attempt: number): Promise<void> {
+      try {
+        // Same-origin request: the session cookie authenticates it.
+        const response = await fetch(
+          `/api/customers/${encodeURIComponent(customerId)}/orders`,
+          { signal: controller.signal, headers: { Accept: 'application/json' } },
+        );
+        if (response.status === 401) return commit({ status: 'unauthorized' });
+        if (response.status === 403) return commit({ status: 'forbidden' });
+        if (!response.ok) throw new HttpError(response.status);
+        const data: unknown = await response.json();
+        // Replace with the project's schema validation if it has one.
+        if (!Array.isArray(data)) throw new Error('Unexpected response shape');
+        const orders = data as Order[];
+        commit(orders.length > 0 ? { status: 'success', orders } : { status: 'empty' });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        // Retry this idempotent read only for network errors (fetch rejects
+        // with TypeError) and 5xx responses. A fuller version would also
+        // honor Retry-After on 429 and 503.
+        const transient =
+          error instanceof HttpError ? error.status >= 500 : error instanceof TypeError;
+        if (transient && attempt < MAX_AUTO_RETRIES) {
+          const delayMs = 500 * 2 ** attempt + Math.random() * 250;
+          retryTimer = setTimeout(() => void load(attempt + 1), delayMs);
+          return;
+        }
+        commit({ status: 'error' });
+      }
+    }
+
+    void load(0);
     return () => {
       controller.abort();
+      clearTimeout(retryTimer);
     };
-  }, [apiEndpoint, authToken, initialData]);
+  }, [customerId, reloadCount]);
 
-  useEffect(() => {
-    if (viewState === 'ERROR' && retryButtonRef.current) {
-      retryButtonRef.current.focus();
-    }
-  }, [viewState]);
-
-  const handleRetry = () => {
-    setViewState('RETRY');
-    setTimeout(() => {
-      fetchData();
-    }, 1000);
-  };
+  function retry() {
+    setView({ status: 'loading' });
+    setReloadCount((count) => count + 1);
+  }
 
   return (
-    <section className="glass-card" aria-live="polite" aria-busy={viewState === 'LOADING' || viewState === 'RETRY'}>
-      <div className="p-6">
-        {viewState === 'INITIAL' && (
-          <div className="state-view state-idle">
-            <p className="text-secondary">Initializing interactive view...</p>
-          </div>
-        )}
-
-        {viewState === 'LOADING' && (
-          <div className="state-view state-skeleton" role="status" aria-label="Loading content">
-            <div className="skeleton-line header-skeleton" />
-            <div className="skeleton-line body-skeleton" />
-          </div>
-        )}
-
-        {viewState === 'RETRY' && (
-          <div className="state-view state-retry" role="status" aria-label="Retrying connection">
-            <div className="skeleton-line header-skeleton" />
-            <p className="text-secondary">Re-establishing connection... (Attempting retry in 1s)</p>
-          </div>
-        )}
-
-        {viewState === 'PERMISSION_DENIED' && (
-          <div className="state-view state-denied" role="alert">
-            <h3>Access Restricted</h3>
-            <p className="text-secondary">Authentication token required to render this dataset.</p>
-          </div>
-        )}
-
-        {viewState === 'EMPTY' && (
-          <div className="state-view state-empty">
-            <h3>No Records Available</h3>
-            <p className="text-secondary">Your filter returned zero records. Create a record or refresh to begin.</p>
-            <button onClick={() => fetchData()} className="btn-secondary">
-              Refresh Data
-            </button>
-          </div>
-        )}
-
-        {viewState === 'ERROR' && (
-          <div className="state-view state-error" role="alert">
-            <h3>Unable to Sync View</h3>
-            <p className="text-secondary">{errorMessage}</p>
-            <button
-              ref={retryButtonRef}
-              onClick={handleRetry}
-              className="btn-primary"
-            >
-              Retry Connection
-            </button>
-          </div>
-        )}
-
-        {viewState === 'SUCCESS' && (
-          <ul className="record-grid" aria-label="Feature data records">
-            {data.map((item) => (
-              <li key={item.id} className="record-card-glass">
-                <span className="record-title">{item.title}</span>
-                <span className="record-badge">{item.category}</span>
-                <span className="record-metric">{item.metric}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+    <section aria-labelledby={headingId}>
+      <h2 id={headingId}>Orders</h2>
+      {/* One polite live region, always mounted so updates are announced. */}
+      <p role="status">{STATUS_TEXT[view.status]}</p>
+      {view.status === 'error' && (
+        <>
+          <p role="alert">Orders could not be loaded.</p>
+          <button type="button" onClick={retry}>Try again</button>
+        </>
+      )}
+      {view.status === 'unauthorized' && <a href="/login">Sign in</a>}
+      {view.status === 'success' && (
+        <ul>
+          {view.orders.map((order) => (
+            <li key={order.id}>{order.label}</li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
 ```
 
----
+A matching Playwright test mocks the network with
+`page.route('**/api/customers/*/orders', ...)` and asserts through
+`page.getByRole('region', { name: 'Orders' }).getByRole('status')`.
 
-## 4. Playwright Public-Seam Browser Test Pattern
+## Guardrails
 
-```typescript
-import { test, expect } from '@playwright/test';
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions,
+  including deploys and preview publishes.
+- Never weaken a test, lint rule, type check, or budget to make work pass.
+- Ask before adding or upgrading dependencies, including UI kits, icon sets,
+  and fonts.
+- Do not change shared tokens, root layouts, global config, or routing config
+  unless the task needs it; name each such change in the report.
+- Never put secrets or bearer tokens in client code, client props, public
+  environment variables, URLs, or browser storage the app does not already use
+  for auth.
+- Never remove a focus indicator without a visible replacement.
 
-test.describe('ExpressiveFeatureContainer E2E & Seam Assertions', () => {
-  test('should display glassmorphic card and transition to success view', async ({ page }) => {
-    await page.route('/api/records', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          { id: '1', title: 'Aurora Engine', category: 'Core', metric: '99.9%' },
-          { id: '2', title: 'Glassmorphic UI', category: 'Frontend', metric: '60 FPS' },
-        ]),
-      });
-    });
+## Verification
 
-    await page.goto('/dashboard/features');
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
-    const card = page.locator('.glass-card');
-    await expect(card).toBeVisible();
+- Type check (for example the project's `typecheck` script, `vue-tsc`,
+  `svelte-check`, or the Angular build): no new errors.
+- Lint, including any accessibility lint plugin: clean for changed files.
+- Component tests for each implemented state, and the focused end-to-end test,
+  pass.
+- Production build succeeds; bundle delta is within the project's budget or
+  reported.
+- Manual pass in a browser when one is available: keyboard through the feature,
+  200% zoom, a narrow viewport, and reduced motion.
 
-    const recordItems = page.locator('.record-card-glass');
-    await expect(recordItems).toHaveCount(2);
-    await expect(recordItems.first()).toContainText('Aurora Engine');
-  });
+## Report
 
-  test('should handle permission denied 403 fallback gracefully', async ({ page }) => {
-    await page.route('/api/records', async (route) => {
-      await route.fulfill({ status: 403 });
-    });
+- **Stack and conventions:** framework, router, design system, and the sibling
+  code you followed.
+- **Changed files:** path and purpose; any shared token, layout, or config change.
+- **States:** implemented, and skipped with the reason.
+- **Data and auth boundary:** where data is fetched and how requests authenticate.
+- **Accessibility:** checks run and results.
+- **Performance:** bundle delta and any Web Vitals measurement, with the tool.
+- **Verification:** each command and its result.
+- **Not verified:** browsers, devices, screen readers, or field metrics not exercised.
 
-    await page.goto('/dashboard/features');
+## Optional delegation
 
-    const alertView = page.locator('.state-denied');
-    await expect(alertView).toBeVisible();
-    await expect(alertView).toContainText('Access Restricted');
-  });
-});
-```
-
----
-
-## 5. Core Web Vitals & SLA Performance Mathematics
-
-$$LCP = t_{\text{render}}(\arg\max_{e \in \text{Viewport}} (\text{Area}(e))) \le 1.2\text{s}$$
-
-$$CLS = \sum_{i} (\text{Impact Fraction}_i \times \text{Distance Fraction}_i) < 0.05$$
-
-$$INP = \text{P98}(\{t_{\text{input\_response}}(e) \mid e \in \text{Interactions}\}) < 100\text{ms}$$
-
-$$\text{Initial Bundle Size} = \sum \text{JS Client Chunks} < 50\text{KB (gzip)}$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-- **No Unapproved Dependencies**: Do **NOT** execute `npm install` or add third-party packages without explicit user authorization.
-- **Strict Allowlisted File Scope**: Restrict modifications strictly to the following output paths:
-  - `components/ui/${FEATURE_NAME}/*` (UI component code and scoped styles)
-  - `${APP_ROOT}${TARGET_ROUTE}/*` (Target route pages, layouts, and server handlers)
-  - `tests/e2e/${FEATURE_NAME}/*` (E2E Playwright seam assertions)
-  - Local global stylesheet declared in `token_source` (e.g. `app/globals.css` or `styles/globals.css`)
-  Do not alter root layout files (`app/layout.tsx`) or global configuration (`next.config.js`) unless explicitly instructed in the brief.
-
-### Security Invariants
-- **Zero Credential Exposure**: Never expose private API keys (`STRIPE_SECRET_KEY`, `DATABASE_PASSWORD`) in client-side bundles or `NEXT_PUBLIC_` environment variables.
-- **XSS Prevention**: Never bypass React DOM escaping with `dangerouslySetInnerHTML` unless input is sanitized through a verified library (e.g. DOMPurify).
-- **Boundary Validation**: Parse all URL parameters, form data, and API payloads through typed Zod or TypeScript contracts before mutating state.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying files, the agent must capture a baseline list of modified and untracked files. If any verification command in Step 6 fails and cannot be resolved within 2 iterations, the agent **must execute targeted rollback restricted ONLY to files created or modified during this run**:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
-After executing targeted rollback, output the exact error trace and state failure causes.
-
----
-
-## 8. Verification Plan & Node.js CI Toolchain Commands
-
-Execute the following frontend toolchain commands using project-local package runners to verify the UI code:
-
-```bash
-# 1. Type check TypeScript components and contracts
-npx --no-install tsc --noEmit
-
-# 2. Execute code linter
-npm run lint
-
-# 3. Run component and unit tests
-npm run test
-
-# 4. Execute Playwright E2E browser seam assertions
-npx --no-install playwright test
-```
+The `frontend-builder` subagent can implement a bounded slice when you give it
+the behavior, contract, assigned paths, and verification commands. Afterwards,
+the `frontend-reviewer` subagent can review the diff and the
+`accessibility-checker` subagent can audit the result in parallel. Re-run any
+check a subagent reports before relying on it.

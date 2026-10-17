@@ -1,237 +1,220 @@
 ---
 name: mobile-release-safety
-description: Plan and audit mobile application releases (iOS/Android/React Native/Flutter) covering app store compliance, code signing, feature flags, OTA updates, and crash symbolication.
+description: "Prepare, audit, and stage an iOS or Android release (native, React Native, Expo, or Flutter): version and build numbers, signing and secrets, permissions and privacy manifests, store policy, symbol upload, phased or staged rollout with halt criteria, OTA update scope, and kill switches. Use before submitting to App Store Connect or Google Play, publishing an OTA update, or planning a halt after a crash spike. Not for web or server deploys (use the deployment-safety skill)."
 ---
 
 # Mobile Release Safety
 
-Plan, audit, and execute mobile application release workflows for iOS App Store Connect and Google Play Console deployments across native (Swift, Kotlin) and cross-platform (React Native, Flutter) frameworks.
+Ship a build the stores accept, that you can diagnose, and that you can stop.
+The stance is **propose, do not push**: submissions, rollout changes, OTA
+publishes, and rollbacks are outward-facing and run only after the release
+owner approves them.
 
-The skill is **contract-first and store-compliant**: app versioning, bundle identifiers, Privacy Manifests (`PrivacyInfo.xcprivacy`), permission usage descriptions, code signing keystores, dSYM / ProGuard mapping file symbolication, Over-The-Air (OTA) JS bundles, and remote kill-switch feature flags are verified before submitting builds.
+## When to use
 
----
+- A store release is being prepared or its configuration audited.
+- An OTA update (EAS Update, CodePush) is about to ship.
+- A rollout plan, halt criteria, or kill switches are needed, or a crash spike
+  after release needs a containment plan.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Web, backend, or infrastructure deploys: use the `deployment-safety` skill.
+- An active incident that needs coordination: use the `incident-triage` skill.
+- A signing key, keystore, or API key was committed: use the
+  `secret-leak-response` skill first.
+- Store "What's New" text or changelogs: use the `release-notes` skill.
+- An independent read-only audit of release config: delegate to the
+  `mobile-specialist` subagent.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Audit our React Native app build for iOS App Store and Google Play submission including dSYM uploads, permissions, and EAS OTA updates"*), the agent **must automatically infer and populate** `platform`, `bundle_id`, `release_version`, and `ota_provider` from the user's text and repository configuration.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "MobileReleaseSafetyContextManifest",
-  "type": "object",
-  "required": ["release_target", "build_config"],
-  "properties": {
-    "release_target": {
-      "type": "object",
-      "required": ["platform", "bundle_id"],
-      "properties": {
-        "platform": { 
-          "type": "string", 
-          "enum": ["ios", "android", "react_native", "flutter", "dual_platform"],
-          "default": "dual_platform" 
-        },
-        "bundle_id": { "type": "string", "pattern": "^[a-zA-Z0-9_.]+$" },
-        "version_name": { "type": "string", "default": "1.0.0" },
-        "version_code": { "type": "integer", "default": 100 }
-      }
-    },
-    "build_config": {
-      "type": "object",
-      "required": ["signing_environment"],
-      "properties": {
-        "signing_environment": { 
-          "type": "string", 
-          "enum": ["fastlane_match", "app_store_connect_api", "play_custom_keystore"],
-          "default": "fastlane_match" 
-        },
-        "symbolication_upload_enabled": { "type": "boolean", "default": true },
-        "min_ios_version": { "type": "string", "default": "15.0" },
-        "min_android_sdk": { "type": "integer", "default": 24 }
-      }
-    },
-    "ota_and_flags": {
-      "type": "object",
-      "properties": {
-        "ota_provider": { "type": "string", "enum": ["eas_update", "codepush", "none"], "default": "none" },
-        "remote_kill_switch_enabled": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
+- **Project type and config:** Xcode project or workspace and `Info.plist`,
+  `android/app/build.gradle` or `build.gradle.kts`, `AndroidManifest.xml`,
+  `app.json` or `app.config.*` and `eas.json` (Expo), `pubspec.yaml` (Flutter).
+- **Store state the repository cannot show:** the last uploaded version and
+  build number per platform, current rollout percentage, and review status. Ask
+  the user.
+- **Pipeline:** fastlane lanes, EAS Build and Submit profiles, Xcode Cloud, or CI
+  workflows, and how signing credentials reach them.
+- **Crash and performance reporting:** Crashlytics, Sentry, Bugsnag, or similar,
+  and how symbols reach it.
+- **OTA setup:** EAS Update channels and `runtimeVersion` policy, or the CodePush
+  server in use (App Center, which hosted CodePush, was retired in 2025).
+- **Feature flags or remote config,** and any minimum-version or force-update gate.
+- **Halt criteria:** the team's crash-free and ANR targets. Use the project's
+  SLO; do not invent one.
+
+## Workflow
+
+1. **Versions and build numbers.**
+   - iOS: `CFBundleShortVersionString` (`MARKETING_VERSION`) is the user-facing
+     version; `CFBundleVersion` (`CURRENT_PROJECT_VERSION`) is the build number
+     and must be higher than every build already uploaded for that version.
+     Keep it increasing across versions too.
+   - Android: `versionCode` must be greater than every `versionCode` already
+     uploaded to any Play track; `versionName` is display only.
+   - Flutter: `version: 1.4.0+42` sets the name and the build number.
+   - Expo: `version`, `ios.buildNumber`, and `android.versionCode`, unless EAS
+     manages them remotely (`appVersionSource` and `autoIncrement` in `eas.json`).
+   - Confirm both platforms ship the version the release notes describe.
+2. **Signing and secrets.** Distribution certificates and provisioning profiles
+   (iOS) and the upload keystore (Android; Play App Signing holds the app signing
+   key) come from the CI secret store or a tool such as fastlane match. This
+   read-only check should print nothing:
+
+   ```bash
+   git ls-files -- '*.jks' '*.keystore' '*.p12' '*.p8' '*.mobileprovision'
+   ```
+
+   Also keep `key.properties`, service-account JSON, and App Store Connect API
+   keys out of the tree.
+3. **Permissions and privacy.**
+   - iOS: every protected resource the app or its SDKs access has a specific
+     purpose string (`NSCameraUsageDescription`, `NSLocationWhenInUseUsageDescription`,
+     and so on); a missing one crashes on access and fails review. Tracking
+     needs `NSUserTrackingUsageDescription` and the App Tracking Transparency
+     prompt before tracking starts.
+   - Privacy manifest: `PrivacyInfo.xcprivacy` is required for App Store
+     submissions when the app or an embedded SDK uses a required-reason API
+     (for example file timestamps, system boot time, disk space, active
+     keyboards, or `UserDefaults`), and SDKs on Apple's list of commonly used
+     third-party SDKs must include their own manifests (and signatures when
+     shipped as binaries). Apple has enforced this since May 2024, regardless of
+     deployment target. Check the declared reasons against actual use, and
+     generate the archive's privacy report in Xcode's Organizer to compare with
+     the App Store privacy labels.
+   - Android: review the merged manifest, not only the app's own, because
+     libraries add permissions. Runtime permissions need denial paths, and
+     `POST_NOTIFICATIONS` is a runtime permission on Android 13 and later.
+     Sensitive permissions (SMS, call log, background location, all-files
+     access, package visibility, photo and video access) need Play Console
+     declarations. Keep the Data safety form consistent with actual collection.
+4. **Store policy and build settings.**
+   - Google Play requires new apps and updates to target a recent Android API
+     level, and the deadline moves each year. Check the current requirement in
+     Play Console policy before comparing it with `targetSdk`.
+   - Ship an Android App Bundle to Play. Release builds enable R8:
+     `minifyEnabled true` (Groovy) or `isMinifyEnabled = true` (Kotlin DSL), with
+     resource shrinking if the project uses it and keep rules for reflection-based
+     libraries.
+   - Release builds are not debuggable, do not ship dev menus or test endpoints,
+     and justify any cleartext traffic or App Transport Security exception.
+   - Deep links: `apple-app-site-association` and `assetlinks.json` are served
+     over HTTPS without redirects, and `assetlinks.json` lists the SHA-256
+     fingerprint of the Play app signing key, not only the upload key.
+5. **Symbols.** Without them, crash reports are unreadable.
+   - iOS: upload the archive's dSYMs with the crash tool's documented step.
+   - Android: upload the R8 mapping file (`app/build/outputs/mapping/release/mapping.txt`)
+     to the crash tool, and confirm Play Console shows a deobfuscation file for
+     the release.
+   - Flutter: builds with `--obfuscate --split-debug-info=<dir>` need those
+     symbol files kept and uploaded. React Native: upload JavaScript source maps,
+     including for each OTA update.
+6. **OTA scope.** EAS Update and CodePush may ship JavaScript and asset changes
+   only. They must not add or change native code, and must not change the app's
+   primary purpose or add features inconsistent with what was reviewed and
+   advertised. Apple allows
+   downloaded interpreted code within those limits (App Review Guideline 2.5.2
+   and the Developer Program License Agreement), and Google Play's policy
+   restricts self-updating outside Play except for code run in an interpreter or
+   virtual machine; check the current policy text for edge cases. The update's
+   `runtimeVersion` (Expo) or target binary version (CodePush) must match the
+   installed binaries it targets; a native change means a new store build.
+   Publish to a preview or staging channel first.
+7. **Rollout plan and halt criteria.** Write the plan before submitting:
+   - iOS phased release for automatic updates runs over 7 days (1, 2, 5, 10, 20,
+     50, then 100 percent), can be paused (up to 30 days in total), and can be
+     released to everyone early. Users can still update manually from the App
+     Store. A shipped iOS version cannot be rolled back; the fix is a new build,
+     with expedited review if warranted.
+   - Google Play staged rollout releases to a chosen percentage of users; raise
+     it step by step, and halt it if a gate fails. Halting stops more users from
+     receiving that release; users who already have it keep it. The fix is a new
+     release with a higher `versionCode`.
+   - Gates come from the team's SLOs: crash-free users or sessions, ANR rate,
+     new top crashes, and key business metrics, compared with the previous
+     release at the same rollout stage. Google Play's Android vitals also
+     publishes bad-behavior thresholds; check the current values.
+   - Kill switches: risky new features sit behind remote flags that default to
+     off when config cannot load. Old app versions stay installed for months, so
+     backend changes must stay compatible with them; use a minimum-version gate
+     only for unavoidable breaks.
+8. **Pre-submission checks.** Build the release variant, install it on physical
+   devices (oldest supported OS and newest), and smoke-test the critical flows.
+   Test an upgrade from the current store version (stored data, keychain or
+   keystore, database migrations), offline and slow network, permission denial,
+   dark mode, large font sizes, and tablets if supported. For an accessibility
+   pass, use the `accessibility-audit` skill's criteria with VoiceOver and
+   TalkBack.
+9. **Propose, then monitor.** Present the submission, rollout, OTA publish, and
+   any halt or rollback as proposed commands, each with a same-line
+   `# requires approval` comment. After approval, watch the gates at each step
+   and propose the next step or a pause. For an OTA regression, propose the
+   provider's documented rollback, such as republishing the previous update or
+   rolling back to the embedded bundle (check `eas update --help` for your CLI
+   version). Never run any of these automatically.
+
+## Example rollout plan
+
+Illustrative; the numbers come from the team's SLOs.
+
+```markdown
+Release 4.12.0 (iOS build 412003, Android versionCode 412003)
+- Gate per step: crash-free users at or above the team SLO, no new top-5 crash,
+  ANR rate not above the previous release, after at least 24 h of data
+- iOS: phased release on; pause if a gate fails; fix forward with a new build
+- Android: staged rollout 5% then 20% then 50% then 100%; halt if a gate fails
+- OTA: none during the rollout window
+- Kill switches: checkout_v2 (off by default if remote config fails to load)
+- Owner and approver: release manager on call
 ```
 
-### Automatic Natural Language Inference & Store Safety Rules
+## Guardrails
 
-If no raw JSON payload is provided, apply these defaults and strict app store safety rules:
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions:
+  store uploads and submissions, rollout changes, OTA publishes, rollbacks,
+  remote flag changes, and cloud builds that spend credits.
+- Never weaken a test, check, or threshold to make work pass.
+- Never commit or print signing material, keystore passwords, or service-account
+  keys. If one is already tracked, stop and use the `secret-leak-response` skill.
+- Do not run commands that change project configuration (for example
+  `eas update:configure` or `eas build:configure`) as verification; propose them
+  as changes.
 
-- **Zero Secret Commits**: NEVER commit `.keystore`, `.jks`, `.p12`, `.mobileprovision`, or service account JSON files to source control.
-- **Privacy Manifest Verification**: iOS builds targeting iOS 17+ MUST include valid `PrivacyInfo.xcprivacy` declaring Required Reason APIs (system boot time, user defaults, disk space).
-- **ProGuard / dSYM Upload**: Release builds MUST generate and upload mapping files (ProGuard `mapping.txt` or Xcode dSYMs) to Sentry / Firebase Crashlytics for symbolication.
+## Verification
 
----
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+fastlane lanes, or the `Makefile`. Run each check separately and report its real
+result; never chain alternatives with `||`.
 
-## 2. Deterministic State Machine Execution Flow
+- Lint, type-check, and unit tests pass.
+- The release variant builds locally or in CI (for example
+  `./gradlew bundleRelease`, an Xcode archive through the project's fastlane
+  lane, or `flutter build appbundle` and `flutter build ipa`).
+- Read-only config checks: `npx expo config --type public` shows the expected
+  versions and `runtimeVersion` (Expo); `npx expo-doctor` reports no blocking
+  issues (Expo); fastlane `precheck` passes if the project uses it.
+- The secret check in step 2 prints nothing.
+- Symbols for the build appear in the crash tool after the first upload.
 
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
+## Report
 
-### Step 1: Build Manifest & Version Code Audit
+- **Release:** platforms, version names, build numbers, and commit.
+- **Checks:** versioning, signing, permissions and privacy, store policy,
+  symbols, and OTA scope, each pass, fail, or not verified, with evidence.
+- **Rollout plan:** steps, gates, kill switches, and owner.
+- **Proposed actions:** each outward-facing command, marked `# requires approval`.
+- **Not verified:** store-side state, device coverage, or policy details that
+  could not be checked from here.
 
-1. Inspect project manifests:
-   - iOS: `Info.plist`, `project.pbxproj` (`CFBundleShortVersionString`, `CFBundleVersion`).
-   - Android: `app/build.gradle` (`versionName`, `versionCode`).
-   - Flutter: `pubspec.yaml` (`version: 1.0.0+100`).
-2. Verify version code auto-increment: `versionCode` must strictly increase over previous store submissions.
+## Optional delegation
 
-### Step 2: Permission Justification & Privacy Manifest Check
-
-1. Audit requested permissions:
-   - iOS `Info.plist`: Ensure every requested permission (`NSCameraUsageDescription`, `NSLocationWhenInUseUsageDescription`, `NSUserTrackingUsageDescription`) has a clear, non-generic user explanation.
-   - Android `AndroidManifest.xml`: Verify dangerous permissions (`CAMERA`, `ACCESS_FINE_LOCATION`, `POST_NOTIFICATIONS`) match Google Play Store declared policies.
-2. Verify Apple Privacy Manifest (`PrivacyInfo.xcprivacy`) declarations for third-party SDK tracking.
-
-### Step 3: Code Signing & Symbolication Mapping Upload
-
-1. Verify release code signing certificates using Fastlane Match or Xcode / Gradle release configurations.
-2. Ensure dSYMs (iOS) and ProGuard `mapping.txt` (Android) are automatically uploaded to Sentry or Firebase Crashlytics in the release pipeline.
-
-### Step 4: Over-The-Air (OTA) Updates & Kill Switches
-
-1. Verify OTA update channels (EAS Update, CodePush):
-   - Enforce runtime JS bundle runtime version matching (`runtimeVersion` in Expo).
-   - Ensure dynamic code loading complies with Apple App Store Review Guideline 2.5.2 (no functional feature changes via OTA).
-2. Configure remote feature flag kill-switches (Firebase Remote Config, LaunchDarkly) for instant feature rollback without re-submitting builds.
-
-### Step 5: Pre-Submission Verification Suite
-
-1. Check deep linking (`URL Schemes`, `Universal Links` / `App Links` via `apple-app-site-association` and `.well-known/assetlinks.json`).
-2. Verify offline caching state and dark mode / tablet layout rendering.
-
----
-
-## 3. Reference Implementation: Node.js / Fastlane Mobile Release Validator
-
-```javascript
-import { readFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
-
-export interface MobileReleaseAuditReport {
-  platform: 'ios' | 'android' | 'cross_platform';
-  passed: boolean;
-  checks: Array<{ name: string; status: 'PASS' | 'FAIL' | 'WARN'; message: string }>;
-}
-
-export function auditMobileRelease(projectRoot: string): MobileReleaseAuditReport {
-  const report: MobileReleaseAuditReport = {
-    platform: 'cross_platform',
-    passed: true,
-    checks: [],
-  };
-
-  // 1. Check iOS Privacy Manifest (PrivacyInfo.xcprivacy)
-  const privacyManifestPath = resolve(projectRoot, 'ios/PrivacyInfo.xcprivacy');
-  if (existsSync(privacyManifestPath)) {
-    report.checks.push({ name: 'iOS Privacy Manifest', status: 'PASS', message: 'PrivacyInfo.xcprivacy found.' });
-  } else {
-    report.checks.push({
-      name: 'iOS Privacy Manifest',
-      status: 'WARN',
-      message: 'PrivacyInfo.xcprivacy missing. Required for iOS 17+ App Store submissions.',
-    });
-  }
-
-  // 2. Check Android ProGuard / R8 Mapping File Config
-  const gradlePath = resolve(projectRoot, 'android/app/build.gradle');
-  if (existsSync(gradlePath)) {
-    const gradleContent = readFileSync(gradlePath, 'utf-8');
-    if (gradleContent.includes('minifyEnabled true')) {
-      report.checks.push({ name: 'Android ProGuard Minification', status: 'PASS', message: 'Minification and mapping generation enabled.' });
-    } else {
-      report.checks.push({ name: 'Android ProGuard Minification', status: 'WARN', message: 'minifyEnabled is set to false in release build.' });
-    }
-  }
-
-  // 3. Check for Secret Keystore Leaks in Git
-  const gitignorePath = resolve(projectRoot, '.gitignore');
-  if (existsSync(gitignorePath)) {
-    const gitignore = readFileSync(gitignorePath, 'utf-8');
-    if (gitignore.includes('*.keystore') || gitignore.includes('*.jks')) {
-      report.checks.push({ name: 'Keystore Git Isolation', status: 'PASS', message: 'Android keystores excluded in .gitignore.' });
-    } else {
-      report.passed = false;
-      report.checks.push({ name: 'Keystore Git Isolation', status: 'FAIL', message: 'CRITICAL: *.keystore / *.jks not found in .gitignore!' });
-    }
-  }
-
-  return report;
-}
-
-if (require.main === module) {
-  const rep = auditMobileRelease(process.cwd());
-  console.log(JSON.stringify(rep, null, 2));
-}
-```
-
----
-
-## 4. Mobile Release Invariants & SLA Metrics
-
-$$\text{Crash-Free Sessions Target: } \text{CrashFreeRate} \ge 99.9\%$$
-
-$$\text{App Binary Size Growth: } \frac{\text{Size}_{\text{new}} - \text{Size}_{\text{old}}}{\text{Size}_{\text{old}}} \times 100\% \le 10\%$$
-
-$$\text{Cold Start SLA: } t_{\text{cold\_start}} \le 1.5\text{ seconds}$$
-
-$$\text{OTA JS Bundle Guideline (Apple 2.5.2): } \text{Scope}(\text{OTA}) \equiv \text{Bug Fixes} \quad (\text{No major structural changes})$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Zero Secret Commits**: Keystores (`.jks`), P12 certificates, and API key JSON files MUST NOT be committed to git.
-- **Strict OTA Scoping**: OTA updates (EAS Update, CodePush) must only be used for JS bug fixes, never for injecting new un-reviewed native features.
-- **Mandatory Rollback Kill-Switches**: All new major mobile features must be wrapped in Remote Config feature flags for instant emergency disabling.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-If a deployed mobile build produces unexpected crash spikes in production:
-
-```bash
-# 1. Trigger immediate OTA JS Rollback (if applicable)
-eas update:rollback --channel production 2>/dev/null
-
-# 2. Toggle Remote Config Feature Flag Kill-Switch
-python3 scripts/toggle_feature_flag.py --flag new_checkout_flow --state false
-```
-
----
-
-## 7. Verification Plan & Toolchain Commands
-
-Execute mobile release pre-submission checks:
-
-```bash
-# 1. Run Fastlane release precheck for iOS and Android
-fastlane run precheck
-
-# 2. Run mobile release safety auditor script
-node scripts/audit_mobile_release.js
-
-# 3. Verify Expo / React Native OTA update compatibility
-npx eas-cli update:configure
-```
-
----
-
-## 8. Completion Report
-
-Report target platforms (iOS, Android), version name and version code verified, Privacy Manifest compliance, permission justifications audited, dSYM / ProGuard mapping file symbolication status, OTA update channels configured, remote kill-switch feature flags verified, and final app store submission readiness verdict.
+The `mobile-specialist` subagent can audit manifests, privacy declarations,
+signing, shrinking, and OTA configuration read-only while you prepare the
+rollout plan. Re-check any blocking finding before acting on it.
