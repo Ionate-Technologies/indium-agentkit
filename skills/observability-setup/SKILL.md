@@ -1,467 +1,262 @@
 ---
 name: observability-setup
-description: "Instrument code with structured logging, metrics, distributed tracing, or alerting following existing observability patterns and avoiding credential exposure."
+description: "Add or improve structured logging, metrics, OpenTelemetry tracing, and alerts in application code using the project's existing libraries, with central redaction, bounded label cardinality, and actionable SLO-based alerts that link a runbook. Use when a service cannot answer an operator question from its signals, new code needs instrumentation, or alerts are noisy, unowned, or missing. Not for writing the runbook itself (use the write-runbook skill) or tuning a slow path (use the performance-optimization skill)."
 ---
 
 # Observability Setup
 
-Add or improve observability instrumentation so operators can detect,
-diagnose, and resolve issues from production signals: structured logs,
-metrics, distributed traces, and actionable alerts. The default target
-stack is a **structured JSON logger with field redaction**,
-**Prometheus-style metrics (counters, histograms, gauges)**,
-**OpenTelemetry tracing with context propagation**, and **threshold-based
-alert rules with runbook links and owners**.
+Instrument a service so operators can tell what is failing, for whom, and why,
+from production signals alone. The stance is **answer operator questions with
+the stack you already have**: every signal maps to a question, every page maps
+to an action, and nothing sensitive leaves the process.
 
-Inspect the project's existing logging, metrics, and tracing patterns
-before introducing new conventions: reuse the established libraries,
-formats, and destinations, and never add a competing framework without
-explicit approval.
+## When to use
 
----
+- A service lacks the logs, metrics, or traces needed to diagnose a failure, or
+  new endpoints, jobs, or integrations need instrumentation before release.
+- Alerts are noisy, duplicated, unowned, cause-based, or missing a runbook link.
+- Logs or telemetry may contain credentials or personal data.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- An incident is in progress: use the `incident-triage` skill.
+- The task is the operator procedure behind an alert: use the `write-runbook`
+  skill.
+- A specific path is slow and needs profiling: use the
+  `performance-optimization` skill.
+- Collector, agent, or monitoring infrastructure configuration needs review: use
+  the `infrastructure-review` skill.
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Add request latency metrics and error
-   alerts to the billing service"*), the agent **must automatically infer
-   and populate** `instrumentation_spec`, `stack_context`, and
-   `alert_context` from the user's text and the existing repository
-   conventions.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these from the repository before asking. Ask only about what remains
+ambiguous and would change the result.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ObservabilitySetupContextManifest",
-  "type": "object",
-  "required": ["instrumentation_spec", "stack_context"],
-  "properties": {
-    "instrumentation_spec": {
-      "type": "object",
-      "required": ["services", "signals"],
-      "properties": {
-        "services": {
-          "type": "array",
-          "items": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-          "minItems": 1
-        },
-        "signals": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["logs", "metrics", "traces", "alerts"] },
-          "minItems": 1
-        },
-        "operator_questions": {
-          "type": "array",
-          "items": { "type": "string" }
-        }
-      }
-    },
-    "stack_context": {
-      "type": "object",
-      "required": ["logging_library", "metrics_library"],
-      "properties": {
-        "logging_library": { "type": "string" },
-        "metrics_library": { "type": "string" },
-        "tracing_library": { "type": "string" },
-        "destinations": {
-          "type": "array",
-          "items": { "type": "string" }
-        }
-      }
-    },
-    "alert_context": {
-      "type": "object",
-      "properties": {
-        "severity_levels": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["page", "ticket", "info"] },
-          "default": ["page", "ticket"]
-        },
-        "max_alerts_per_service": { "type": "integer", "default": 10 },
-        "runbook_url_template": { "type": "string" }
-      }
-    }
-  }
-}
+- The operator questions to answer: which requests fail, how slow, for which
+  route or tenant class, and which dependency is at fault.
+- Existing libraries (logger, metrics client, tracing SDK, auto-instrumentation)
+  from dependency manifests and instrumentation modules, and their destinations
+  (OTLP endpoint, collector, `/metrics` scrape, log shipping, sampling).
+- Conventions: log field names, levels, metric naming, and the semantic
+  conventions version the existing instrumentation emits.
+- SLOs, alert rule files, on-call routing, ownership, and where runbooks live.
+- Data classification: which fields are personal data, credentials, or
+  otherwise sensitive.
+
+## Workflow
+
+1. **Discover the stack.** Reuse the established libraries, formats, and
+   destinations. Never add a competing framework or a new telemetry destination
+   without approval. If nothing exists, propose OpenTelemetry as a vendor-neutral
+   default and ask before adding dependencies.
+2. **Gap analysis.** Map each operator question to a signal, and list what is
+   missing. Do not instrument anything no question needs.
+3. **Structured logs at decision points.** Request entry and outcome (unless
+   access logs already cover it), authorization decisions, data mutations,
+   external calls, errors, retries, and fallbacks. Use the project's field names
+   and levels, and include the trace and span IDs so logs join traces (most
+   OpenTelemetry SDKs offer a logging bridge for this). Avoid per-request debug
+   logs on hot paths.
+4. **Central redaction.** Redact in one auditable place, the logger's
+   configuration or a processor or filter on every handler, not ad hoc at call
+   sites. Cover at least passwords, tokens, secrets, API keys, `Authorization`
+   and `Cookie` headers, session IDs, and the personal data the project
+   classifies as sensitive. Never log request or response bodies wholesale;
+   allowlist the fields you need.
+5. **Metrics.** Use RED for request-driven work (rate, errors, duration) and USE
+   for resources (utilization, saturation, errors): counters for events,
+   histograms for latency and sizes, gauges for queue depth or pool use.
+   - Follow the project's naming scheme. For Prometheus, use base units and
+     suffixes (`_seconds`, `_bytes`, `_total` on counters). For OpenTelemetry
+     metrics, use semantic-convention names such as
+     `http.server.request.duration` (seconds).
+   - Keep label cardinality bounded. Series per metric is roughly the product of
+     each label's distinct values, multiplied across instances. Use route
+     templates, methods, and status classes; never user IDs, request IDs, emails,
+     raw URLs, or error messages. Keep within the project's series budget (for
+     example, hundreds rather than tens of thousands per metric).
+   - Put a histogram bucket boundary at the SLO latency threshold, so the share
+     of requests within it can be computed exactly.
+6. **Tracing.** Propagate W3C Trace Context (`traceparent`, `tracestate`) across
+   HTTP and messaging boundaries; the OpenTelemetry default propagators do this.
+   - Prefer instrumentation libraries for HTTP servers and clients, database
+     drivers, and queues, and add manual spans only for meaningful I/O or
+     business operations, not trivial helpers.
+   - Name attributes by the OpenTelemetry semantic conventions:
+     `http.request.method`, `http.route`, `http.response.status_code`,
+     `server.address`, `error.type`, and the resource attributes `service.name`
+     and `service.version`. Older instrumentation emits earlier names (for
+     example `http.method`, `http.status_code`), and database names changed too.
+     Match the version your SDK and instrumentation emit rather than mixing
+     them; for migrations, check whether they support
+     `OTEL_SEMCONV_STABILITY_OPT_IN`.
+   - Put custom attributes under a project namespace (for example
+     `billing.batch.size`). Never put credentials, personal data, or full URLs
+     with query strings into attributes.
+   - Keep span names low-cardinality (`GET /orders/{id}`, not the raw path). For
+     HTTP, a server span is an error only on 5xx; a client span is an error on
+     4xx and 5xx.
+   - Sampling follows project policy: head sampling in the SDK (parent-based
+     ratio) and, if the project runs a collector, tail sampling to keep errors
+     and slow traces.
+7. **Alerts.** Prefer symptom-based alerts on user-facing SLOs (error-budget
+   burn rate) over cause-based ones (CPU, memory, restarts).
+   - Every paging alert must be actionable, owned (team or routing label), have
+     a severity, and link a runbook and dashboard.
+   - Cause-based alerts become tickets or dashboards unless they predict
+     imminent user impact (for example a disk filling within hours).
+   - Deduplicate rules that fire on the same condition, and use recording rules
+     for expensive ratios.
+
+## Reference snippets (illustrative)
+
+Python with the standard `logging` module, `prometheus_client`, and the
+OpenTelemetry API; adapt to the project's libraries and names.
+
+```python
+import logging
+import time
+
+from opentelemetry import trace
+from prometheus_client import Counter, Histogram
+
+# The single redaction point. Attach the filter to every handler, because
+# filters on a logger do not apply to records propagated from child loggers.
+SENSITIVE_KEYS = {"password", "token", "secret", "authorization", "cookie",
+                  "session_id", "api_key", "email"}
+
+
+def redact(value):
+    if isinstance(value, dict):
+        return {k: "[REDACTED]" if str(k).lower() in SENSITIVE_KEYS else redact(v)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    return value
+
+
+class RedactFilter(logging.Filter):
+    def filter(self, record):
+        for key, val in list(vars(record).items()):
+            if key.lower() in SENSITIVE_KEYS:
+                setattr(record, key, "[REDACTED]")
+            elif isinstance(val, dict):
+                setattr(record, key, redact(val))
+        return True
+
+
+SETTLEMENTS = Counter(  # exposed as billing_settlements_total
+    "billing_settlements", "Settlement attempts by outcome.", ["outcome"])
+SETTLE_SECONDS = Histogram(
+    "billing_settlement_duration_seconds", "Time to settle one batch.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10))
+
+tracer = trace.get_tracer("billing.settlement")
+log = logging.getLogger("billing.settlement")
+
+
+def submit(invoices: list) -> str:
+    """Project code; returns "succeeded" or "declined"."""
+    raise NotImplementedError
+
+
+def settle(batch_id: str, invoices: list) -> None:
+    # start_as_current_span records exceptions and sets ERROR status by default.
+    with tracer.start_as_current_span("settle invoice batch") as span:
+        span.set_attribute("billing.batch.size", len(invoices))
+        start = time.perf_counter()
+        outcome = "error"
+        try:
+            outcome = submit(invoices)  # instrumented HTTP client adds child spans
+        finally:
+            SETTLE_SECONDS.observe(time.perf_counter() - start)
+            SETTLEMENTS.labels(outcome=outcome).inc()  # bounded label values
+            # IDs go to logs and span attributes, never to metric labels.
+            log.info("settlement.finished",
+                     extra={"batch_id": batch_id, "outcome": outcome})
 ```
 
-### Automatic Natural Language Inference & Safety Rules
+A multiwindow burn-rate page for a 99.9% availability SLO over 30 days (error
+budget 0.001). A burn rate of 14.4 spends 2% of the monthly budget in one hour;
+requiring both the 1-hour and 5-minute windows makes it page fast and reset
+fast. A slower pair (for example burn rate 6 over 6 hours and 30 minutes) catches
+slower burns. Substitute the project's SLO, metric names, and labels.
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
-
-- **`services`**: Extracted from the prompt noun or the module being
-  edited; defaults to the service that owns the files in the change set.
-- **`signals`**: Inferred from prompt keywords ("log", "metric", "trace",
-  "alert"). Defaults to the signals the service currently lacks, per the
-  gap analysis in Step 2.
-- **`stack_context`**: Detected from dependency manifests
-  (`package.json`, `pyproject.toml`, `go.mod`) and existing
-  instrumentation modules. If no metrics library exists, ask before
-  introducing one; never run two metrics frameworks side by side.
-- **`destinations`**: Detected from existing exporter configuration (for
-  example a `/metrics` endpoint or a collector address). Do not invent new
-  destinations.
-- **`alert_context.max_alerts_per_service`**: Defaults to 10; treat the
-  budget as a hard ceiling and consolidate or drop low-value rules before
-  adding new ones.
-- **Sensitive-data safety**: Field names such as `password`, `token`,
-  `secret`, `authorization`, `cookie`, `session_id`, and `email` are always
-  redacted by default, even when the user does not mention them.
-
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
-
-### Step 1: Context Ingestion & Stack Discovery
-
-1. Read `AGENTS.md`, existing observability code, logging configuration,
-   metrics exports, tracing setup, and alert definitions.
-2. Identify the established libraries, formats (JSON versus text), field
-   naming conventions, severity levels, and destinations.
-3. Record the discovered stack in `stack_context`; any deviation requires
-   explicit user approval before implementation.
-
-### Step 2: Operator Need & Gap Analysis
-
-1. Define what operators need to observe: request flow, error rates,
-   latency distributions, resource utilization, business outcomes, or
-   dependency health.
-2. Map each need to a concrete signal and state precisely what is
-   currently missing; do not instrument what no operator question
-   requires.
-
-### Step 3: Structured Logging at Decision Points
-
-1. Add structured log statements at meaningful decision points: request
-   entry, authorization decisions, data mutations, external calls, errors,
-   and retry or fallback paths.
-2. Use consistent field names and severity levels matching the project's
-   existing conventions (`request_id`, `actor_id`, `duration_ms`, and so
-   on).
-
-### Step 4: Sensitive-Data Redaction
-
-1. Never log credentials, tokens, session identifiers, personal data, or
-   request bodies that contain sensitive content.
-2. Redact or omit fields through the logger's central redaction layer;
-   keep the denylist in a single auditable location rather than scattering
-   ad-hoc filters across call sites.
-
-### Step 5: Metrics for Alerting Signals
-
-1. Add metrics for the signals that drive alerts and dashboards: counters
-   for operations, histograms for latency, gauges for queue depth or
-   connection pools.
-2. Reuse the project's metrics library and naming scheme
-   (`<service>_<operation>_<unit>`); keep label cardinality inside the
-   budget from Section 5.
-
-### Step 6: Trace Context Propagation & Spans
-
-1. Propagate trace context through service boundaries (HTTP headers,
-   message metadata) wherever distributed tracing is in use.
-2. Add spans for I/O-bound or high-latency operations (database queries,
-   outbound HTTP, queue publishes); do not wrap trivial CPU-only helpers.
-
-### Step 7: Actionable Alert Rules
-
-1. Define or update alert rules with actionable thresholds, severity,
-   runbook links, and clear ownership.
-2. Avoid alert fatigue: every `page`-level rule must map to a documented
-   operator action; deduplicate rules that fire on the same condition.
-
-### Step 8: Local Verification
-
-1. Verify instrumentation compiles and the project's tests pass.
-2. Verify logs and metrics appear in local or test output without exposing
-   sensitive data, using the pattern in Section 4.
-
----
-
-## 3. Reference Implementation: Structured Logging, RED Metrics & Span Propagation
-
-```typescript
-import { trace, context, SpanStatusCode, propagation } from '@opentelemetry/api';
-import client from 'prom-client';
-
-// --- 1. Structured logger with a single auditable redaction denylist ---
-const SENSITIVE_FIELDS = new Set([
-  'password', 'token', 'secret', 'authorization', 'cookie', 'session_id',
-  'email', 'ssn', 'credit_card',
-]);
-
-type LogFields = Record<string, unknown>;
-
-function redact(fields: LogFields): LogFields {
-  const out: LogFields = {};
-  for (const [key, value] of Object.entries(fields)) {
-    out[key] = SENSITIVE_FIELDS.has(key.toLowerCase()) ? '[REDACTED]' : value;
-  }
-  return out;
-}
-
-function write(level: 'info' | 'error', event: string, fields: LogFields): void {
-  const line = JSON.stringify({
-    level,
-    event,
-    ts: new Date().toISOString(),
-    ...redact(fields),
-  });
-  process.stdout.write(line + '\n');
-}
-
-export const logger = {
-  info: (event: string, fields: LogFields = {}) => write('info', event, fields),
-  error: (event: string, fields: LogFields = {}) => write('error', event, fields),
-};
-
-// --- 2. Prometheus-style RED metrics; low-cardinality labels only ---
-const register = new client.Registry();
-client.collectDefaultMetrics({ register });
-
-export const httpRequestsTotal = new client.Counter({
-  name: 'billing_http_requests_total',
-  help: 'Total HTTP requests by route template, method, and status class.',
-  // Route templates only: never raw paths, IDs, or query strings.
-  labelNames: ['route', 'method', 'status_class'],
-  registers: [register],
-});
-
-export const httpRequestDuration = new client.Histogram({
-  name: 'billing_http_request_duration_seconds',
-  help: 'HTTP request latency distribution.',
-  labelNames: ['route', 'method'],
-  buckets: [0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5],
-  registers: [register],
-});
-
-export const queueDepth = new client.Gauge({
-  name: 'billing_outbound_queue_depth',
-  help: 'Current depth of the outbound webhook queue.',
-  registers: [register],
-});
-
-// --- 3. Request middleware: logs, metrics, and a server span in one seam ---
-const tracer = trace.getTracer('billing-service');
-
-export function observabilityMiddleware(req, res, next): void {
-  const startedAt = process.hrtime.bigint();
-  const requestId = req.headers['x-request-id'] ?? crypto.randomUUID();
-  const routeTemplate = req.route?.path ?? 'unknown';
-
-  // Extract upstream trace context so this span joins the caller's trace.
-  const parentContext = propagation.extract(context.active(), req.headers);
-
-  context.with(parentContext, () => {
-    tracer.startActiveSpan(`${req.method} ${routeTemplate}`, (span) => {
-      span.setAttribute('http.request.method', req.method);
-      span.setAttribute('http.route', routeTemplate);
-      logger.info('http.request.start', {
-        request_id: requestId,
-        route: routeTemplate,
-        method: req.method,
-      });
-
-      res.on('finish', () => {
-        const durationSeconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
-        const statusClass = `${Math.floor(res.statusCode / 100)}xx`;
-        httpRequestsTotal.inc({ route: routeTemplate, method: req.method, status_class: statusClass });
-        httpRequestDuration.observe({ route: routeTemplate, method: req.method }, durationSeconds);
-        span.setAttribute('http.response.status_code', res.statusCode);
-        if (res.statusCode >= 500) {
-          span.setStatus({ code: SpanStatusCode.ERROR });
-        }
-        logger.info('http.request.finish', {
-          request_id: requestId,
-          status: res.statusCode,
-          duration_ms: Math.round(durationSeconds * 1000),
-        });
-        span.end();
-      });
-
-      next();
-    });
-  });
-}
-
-// --- 4. Outbound call seam: inject trace context for the downstream hop ---
-export async function callDownstream(url: string, payload: unknown, requestId: string) {
-  return tracer.startActiveSpan('downstream.payments.authorize', async (span) => {
-    const headers: Record<string, string> = {};
-    propagation.inject(context.active(), headers); // W3C traceparent headers
-    try {
-      logger.info('downstream.call.start', { request_id: requestId, target: 'payments' });
-      const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
-      span.setAttribute('http.response.status_code', response.status);
-      return response;
-    } catch (err) {
-      span.setStatus({ code: SpanStatusCode.ERROR });
-      logger.error('downstream.call.error', { request_id: requestId, target: 'payments', error_kind: 'network' });
-      throw err;
-    } finally {
-      span.end();
-    }
-  });
-}
-
-export { register };
+```yaml
+groups:
+  - name: checkout-slo
+    rules:
+      - alert: CheckoutErrorBudgetFastBurn
+        expr: |
+          (
+            sum(rate(checkout_http_requests_total{status_class="5xx"}[1h]))
+            / sum(rate(checkout_http_requests_total[1h]))
+          ) > (14.4 * 0.001)
+          and
+          (
+            sum(rate(checkout_http_requests_total{status_class="5xx"}[5m]))
+            / sum(rate(checkout_http_requests_total[5m]))
+          ) > (14.4 * 0.001)
+        labels:
+          severity: page
+          team: checkout
+        annotations:
+          summary: "Checkout is spending its 30-day error budget over 14x too fast"
+          runbook_url: "https://runbooks.example.internal/checkout/error-budget-burn"
+          dashboard: "https://grafana.example.internal/d/checkout-slo"
 ```
 
----
+## Guardrails
 
-## 4. Local Verification Pattern: Redaction & Metrics Scrape Tests
+- Revert or delete only files you created or changed in this session, and say
+  so. Never remove existing dashboards, alert rules, or exporter configuration
+  you did not create.
+- Ask before adding a telemetry dependency, a new destination or exporter, or
+  changing paging routes. Never ship telemetry to an unapproved third party.
+- No credentials, tokens, session IDs, or personal data in logs, metric labels,
+  or span attributes; redaction lives in one place and has a test. No unbounded
+  label values; IDs belong in logs and traces.
+- Never weaken a test, check, or alert threshold to make work pass. Changing an
+  existing threshold needs the owner's agreement and a reason in the report.
+- Instrumentation on hot paths has a cost. If overhead could matter, measure it
+  with the `performance-optimization` skill rather than guessing.
 
-```typescript
-import { test, expect, vi } from 'vitest';
-import { logger, register, httpRequestsTotal } from './observability';
+## Verification
 
-test('logger redacts sensitive fields before writing', () => {
-  const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately; never chain alternatives with `||`.
 
-  logger.info('payment.attempt', {
-    request_id: 'req-123',
-    authorization: 'Bearer <test-token>',
-    password: '<test-password>',
-    amount_cents: 4200,
-  });
+- Type check, lint, and tests pass, including a test that logs sensitive fields
+  (top-level and nested) through the configured handler and asserts that only
+  `[REDACTED]` appears.
+- Start the service locally, send a few requests, and scrape its metrics
+  endpoint (for example `curl -s http://127.0.0.1:<port>/metrics`). Only the
+  declared label names appear, and no label value looks like an ID, email, or
+  token. Stop the service afterward.
+- Traces: with a console exporter or local collector, one request across two
+  services shares a trace ID, the parent and child links are correct, and the
+  attribute names match the semantic conventions version in use.
+- Alert rules: for Prometheus, `promtool check rules <file>` passes, and
+  `promtool test rules <test-file>` passes when the project keeps rule tests.
+  Every paging rule has an owner, severity, and runbook link.
 
-  const written = writeSpy.mock.calls.map((call) => String(call[0])).join('');
-  expect(written).toContain('"request_id":"req-123"');
-  expect(written).toContain('"amount_cents":4200');
-  expect(written).not.toContain('<test-token>');
-  expect(written).not.toContain('<test-password>');
-  expect(written).toContain('[REDACTED]');
-  writeSpy.mockRestore();
-});
+## Report
 
-test('metrics registry exposes RED series with low-cardinality labels', async () => {
-  httpRequestsTotal.inc({ route: '/v1/charges', method: 'POST', status_class: '2xx' });
+- **Signals added:** log events, metric series with their labels, spans, and
+  alert rules, each mapped to the operator question it answers.
+- **Stack reused:** libraries, destinations, and the semantic conventions
+  version followed.
+- **Safeguards:** redacted fields and where redaction lives, label restrictions,
+  and the estimated series count per new metric.
+- **Alerts:** thresholds with their SLO source, owner, severity, and runbook
+  link; runbooks still to be written.
+- **Verification:** each command and its result.
+- **Gaps and not verified:** areas still unobserved, overhead not measured, and
+  checks that could not run.
 
-  const metricsText = await register.metrics();
-  expect(metricsText).toContain(
-    'billing_http_requests_total{route="/v1/charges",method="POST",status_class="2xx"} 1',
-  );
-  // Guard: no bearer material, emails, or UUID-shaped IDs in label values.
-  expect(metricsText).not.toMatch(/Bearer/i);
-  expect(metricsText).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/);
-});
-```
+## Optional delegation
 
-Run the scrape check against a locally started instance as well:
-`curl -sf http://127.0.0.1:9464/metrics | grep -E 'billing_http_requests_total'`
-and confirm the emitted series carry only the declared label names.
-
----
-
-## 5. Cardinality, Noise & Coverage Invariants
-
-$$\text{SeriesCardinality}(m) = \prod_{l \in \text{labels}(m)} |\text{values}(l)| \le 1000 \quad \forall \text{ metric } m$$
-
-$$\text{ActionableAlertRatio} = \frac{\#\{\text{alerts with a documented operator action}\}}{\#\{\text{alerts fired}\}} \ge 0.9$$
-
-$$\text{PageBudget}(\text{service}) \le 2 \text{ pages} / \text{week}, \qquad \#\{\text{alert rules per service}\} \le \texttt{max\_alerts\_per\_service}$$
-
-$$\text{TraceSamplingRate} = \begin{cases} 1.0 & \text{errors and slow traces} \\ \le 0.1 & \text{nominal traffic} \end{cases}$$
-
-$$\text{RedUseCoverage} = \frac{\#\{\text{critical ops with counter} \wedge \text{latency histogram} \wedge \text{error signal}\}}{\#\{\text{critical ops}\}} = 1$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **Follow the Existing Stack**: Reuse the project's logging, metrics, and
-  tracing libraries and destinations. Do not introduce a competing logging
-  or metrics framework without explicit approval.
-- **Lightweight Instrumentation**: Do not add high-cardinality labels
-  (user IDs, request IDs, raw URLs) or verbose per-request debug logging
-  that could impact performance or observability cost.
-- **Bounded Alert Surface**: Stay within the alert budget; every new
-  `page`-level rule needs a documented operator action, a severity, and a
-  runbook link.
-- **Single-Agent Executable**: Optional performance-profiler delegation
-  can verify instrumentation overhead, but one agent must be able to
-  complete this workflow end to end.
-
-### Security Invariants
-
-- **Zero Credential Exposure**: Never log credentials, tokens, session
-  identifiers, personal data, or request bodies containing sensitive
-  content; redact or omit through the central denylist.
-- **No Sensitive Label Values**: Metric label values and span attributes
-  must never contain credentials, personal data, or raw identifiers.
-- **Safe Destinations**: Do not add exporters that ship telemetry to
-  unapproved third-party endpoints; reuse the configured destinations
-  only.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying files, capture a baseline list of modified and
-untracked files. If any verification command in Section 8 fails and cannot
-be resolved within 2 iterations, execute targeted rollback restricted ONLY
-to files created or modified during this run:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
-```
-
-After executing targeted rollback, output the exact error trace and state
-failure causes. Do not delete pre-existing dashboards, alert rules, or
-exporter configuration that were not created by this run.
-
----
-
-## 8. Verification Plan & Runtime Toolchain Commands
-
-Execute the following commands using project-local runners; adapt to the
-project's declared scripts and runtime:
-
-```bash
-# 1. Type check and lint the instrumented code
-npx --no-install tsc --noEmit
-npm run lint
-
-# 2. Run the test suite including redaction and metrics tests
-npm run test
-
-# 3. Start the service locally and confirm the metrics endpoint emits
-npm run start &
-sleep 3
-curl -sf http://127.0.0.1:9464/metrics | grep -E 'billing_http_requests_total'
-
-# 4. Exercise one request and confirm structured logs contain no secrets
-curl -sf -H 'Authorization: Bearer <redacted-test-token>' \
-  http://127.0.0.1:8080/v1/charges -o /dev/null
-# Inspect local log output: expect [REDACTED] placeholders, never token values.
-```
-
----
-
-## 9. Completion Report
-
-Report the instrumentation added (log events, metric series, spans, and
-alert rules), the operator questions each signal answers, the libraries and
-destinations reused, the sensitive-data safeguards applied (denylist
-fields, label restrictions), the alert thresholds with owners and runbook
-links, the commands run with their results, any instrumentation overhead
-notes, and the areas that remain unobserved with a recommended follow-up.
+The `performance-profiler` subagent can measure instrumentation overhead on a hot
+path. The `runbook-writer` subagent can draft the runbook a new paging alert
+links to. The `security-reviewer` subagent can review telemetry for sensitive
+data exposure. One agent can complete this workflow alone.
