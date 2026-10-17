@@ -56,6 +56,17 @@ The npm CLI creates durable copies by default because links into a temporary
 the destination to follow a local agentkit checkout. Existing files that are
 not an exact copy or an agentkit link are reported and left untouched.
 
+To upgrade copies installed by an earlier version, rerun the same command with
+`--force`. It replaces only skills, subagents, and Cursor rules named after
+agentkit content, and never replaces `AGENTS.md` or `CLAUDE.md`:
+
+```bash
+npx @indium-ai-labs/agentkit install --target=claude --force
+```
+
+Items marked internal in `CATALOG.md` apply only to this repository and are left
+out of the `install` bundle; `add <name>` still installs one explicitly.
+
 Project-context files follow the selected architecture:
 
 | Target | Project content | Project context |
@@ -144,7 +155,10 @@ description and Markdown body with `alwaysApply: false`.
 
 Subagents do not yet have a unified cross-tool schema. Agentkit uses Claude
 Code-compatible frontmatter (`name`, `description`, `tools`, and `model`) as
-the portable source shape. Use `templates/subagent.md` when authoring a role.
+the portable source shape. Most subagents are read-only reviewers and
+investigators; a few implementers (`backend-builder`, `frontend-builder`,
+`test-writer`, `doc-writer`) declare `Edit` and `Write` and change only the paths
+the parent assigns. `ARCHITECTURE.md` lists each role.
 
 ## Repository layout
 
@@ -155,7 +169,10 @@ indium-agentkit/
 |-- agents/
 |-- skills/
 |-- templates/
-|   `-- AGENTS.md
+|   |-- AGENTS.md
+|   |-- skill.md
+|   |-- subagent.md
+|   `-- handoffs/
 |-- scripts/
 |   |-- cli.js
 |   |-- install.py
@@ -169,8 +186,14 @@ indium-agentkit/
 ## Adding content
 
 Create skills at `skills/<name>/SKILL.md` and subagents at
-`agents/<name>.md`. Follow `CONTRIBUTING.md`, regenerate `CATALOG.md`, and keep
-skills executable by a single agent even when delegation can accelerate them.
+`agents/<name>.md`, starting from `templates/skill.md` and `templates/subagent.md`
+or `scripts/scaffold_content.py`. The authoring standard is in
+`skills/author-agentkit-content/SKILL.md`, and `scripts/validate_content.py`
+enforces it: trigger-focused descriptions, size limits, resolvable
+cross-references, no repository-only script references, and no destructive
+commands without an approval gate. Follow `CONTRIBUTING.md`, regenerate
+`CATALOG.md`, and keep skills executable by a single agent even when delegation
+can accelerate them.
 
 ## Validation
 

@@ -14,8 +14,9 @@ python scripts/codex_delegate.py \
   --format json
 ```
 
-The packet contains the role metadata, bounded task, allowed paths, inferred
-write mode, required evidence, and a ready-to-pass prompt. A native Codex
+The packet contains the role metadata, bounded task, allowed paths, write mode
+(`read-only`, or `scoped` when the role declares `Edit` or `Write`), required
+evidence, and a ready-to-pass prompt. A native Codex
 orchestrator can run independent packets in parallel, then have the main agent
 validate and synthesize the reports.
 
