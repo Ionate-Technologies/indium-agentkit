@@ -43,6 +43,24 @@ provide, and a clear output format. Choose one of two roles:
 
 Prefer a read-only specialist unless the role exists to make changes.
 
+## Using agentkit in this repository
+
+`npx @indium-ai-labs/agentkit` fails inside this checkout because npm treats the
+checkout as the requested package and looks for its command in a
+`node_modules/.bin` directory that does not exist. Install from the checkout
+instead:
+
+```bash
+python scripts/install.py --scope project --project-dir . --target claude --mode link
+python scripts/install.py --scope project --project-dir . --target claude --mode link --item author-agentkit-content
+```
+
+Links follow your edits. On Windows they need Developer Mode, so use
+`--mode copy` there and rerun with `--force` after changing content. Omit
+`--include-context`, because the root `AGENTS.md` already provides this
+repository's context. Git ignores the installed `.claude/skills/` and
+`.claude/agents/`.
+
 ## Required checks
 
 Run these commands before committing:
