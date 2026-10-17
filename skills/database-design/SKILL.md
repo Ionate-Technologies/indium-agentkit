@@ -1,446 +1,286 @@
 ---
 name: database-design
-description: Design safe PostgreSQL schemas and staged migrations.
+description: "Design relational schemas, constraints, and indexes from real access patterns, plus a staged migration plan with reconciliation queries, defaulting to PostgreSQL. Use when adding or changing tables, columns, keys, relationships, or indexes, or when a feature needs a new data model. Not for executing a rollout (use the safe-migration skill) or tuning existing slow queries (use the query-optimization skill)."
 ---
 
 # Database Design
 
-Design data models, database-enforced invariants, and compatible staged
-migrations before implementation. **PostgreSQL** is the default target engine;
-inspect the repository and respect the project's current database, ORM,
-migration tool, and operational constraints (connection limits, replication
-topology, deploy cadence) before proposing anything.
+Turn a feature's data needs into a schema whose critical invariants the database
+enforces, a staged migration plan, and the queries that prove the migration
+worked. The stance is **design and verify, never execute in production**: this
+skill writes DDL, plans, and checks; running them against shared or production
+databases waits for the operator.
 
-The skill is **design and verification focused**: it produces a reviewed schema
-proposal and a staged migration plan captured in
-`templates/handoffs/data-migration-plan.md` (or the project's equivalent), plus
-the validation queries that prove correctness. It never executes production
-migrations.
+PostgreSQL is the default. Follow the project's actual engine, ORM, and
+migration tool.
 
----
+## When to use
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+- A feature needs new tables, or changes to columns, keys, constraints,
+  relationships, or indexes.
+- Choosing indexes for known access paths before the code ships.
+- Replacing or splitting an existing table while old and new application
+  versions may run against the same database.
 
-The skill supports **two invocation modes**:
+## When not to use
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Design the tables for per-team API keys
-   with usage tracking and a safe rollout from the existing tokens table"*),
-   the agent **must automatically infer and populate** `entity_spec`,
-   `access_pattern_context`, and `migration_context` from the user's text and
-   the existing repository schema.
+- Executing the staged rollout (backfill runs, dual writes, cutover, rollback):
+  use the `safe-migration` skill. This skill produces the plan it executes.
+- An existing query is slow: use the `query-optimization` skill.
+- Warehouse or analytics models: use the `data-pipeline-design` skill.
+- Event-sourced stores: use the `event-sourcing-architecture` skill.
+- Independent review: delegate the model, constraints, and indexes to the
+  `database-architect` subagent, and the rollout and lock hazards to the
+  `migration-planner` subagent.
 
-### JSON Context Manifest Schema
+## Inputs to gather
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DatabaseDesignContextManifest",
-  "type": "object",
-  "required": ["entity_spec", "migration_context"],
-  "properties": {
-    "entity_spec": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "required": ["entity_name", "primary_key"],
-        "properties": {
-          "entity_name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-          "primary_key": { "type": "string" },
-          "ownership_scope": { "type": "string", "enum": ["user", "team", "tenant", "global"] },
-          "estimated_rows": { "type": "integer", "minimum": 0 },
-          "contains_pii": { "type": "boolean", "default": false },
-          "retention_policy": { "type": "string" },
-          "relationships": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": ["target_entity", "cardinality"],
-              "properties": {
-                "target_entity": { "type": "string" },
-                "cardinality": { "type": "string", "enum": ["one_to_one", "one_to_many", "many_to_many"] },
-                "on_delete": { "type": "string", "enum": ["restrict", "cascade", "set_null", "no_action"], "default": "restrict" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "access_pattern_context": {
-      "type": "object",
-      "required": ["query_patterns"],
-      "properties": {
-        "query_patterns": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["description", "frequency"],
-            "properties": {
-              "description": { "type": "string" },
-              "frequency": { "type": "string", "enum": ["per_request", "periodic", "rare"] },
-              "predicates": { "type": "array", "items": { "type": "string" } },
-              "ordering": { "type": "string" },
-              "expected_selectivity": { "type": "string", "enum": ["high", "medium", "low"] }
-            }
-          }
-        },
-        "read_write_ratio": { "type": "string", "pattern": "^[0-9]+:[0-9]+$" }
-      }
-    },
-    "migration_context": {
-      "type": "object",
-      "required": ["migration_kind", "stages"],
-      "properties": {
-        "migration_kind": { "type": "string", "enum": ["greenfield", "expand_contract", "backfill_only", "index_only"] },
-        "stages": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["preflight", "expand", "backfill", "dual_write", "dual_read", "cutover", "contract", "verify", "rollback"] },
-          "minItems": 2
-        },
-        "backfill_batch_size": { "type": "integer", "minimum": 100, "maximum": 100000, "default": 5000 },
-        "lock_timeout_budget_ms": { "type": "integer", "minimum": 100, "maximum": 60000, "default": 3000 },
-        "zero_downtime_required": { "type": "boolean", "default": true }
-      }
-    }
-  }
-}
-```
+Discover these before asking. Ask only about what remains ambiguous and would
+change the design.
 
-### Automatic Natural Language Inference Rules
+- Engine and version, ORM, migration tool, and whether that tool wraps each
+  migration in a transaction (manifests, migration directories, `AGENTS.md`).
+- Existing schema and its naming, type, and index conventions (migration
+  history and ORM models).
+- Access patterns: the queries the feature will run (filters, sort order, joins),
+  how often, and expected row counts. Derive them from the API contract and call
+  sites; flag guessed selectivity as an assumption.
+- Ownership or tenancy, retention, PII columns, and deletion obligations.
+- Operational constraints: table sizes, write rate, replicas, deploy ordering,
+  and whether old application versions keep running during the change.
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+## Workflow
 
-- **`entity_spec`**: Extract entities from the prompt nouns and the existing
-  schema (inspect the migrations directory and ORM models). Table names follow
-  the project's existing snake_case pluralization convention.
-- **`access_pattern_context.query_patterns`**: Derived from the API contract's
-  operations and existing query call sites. Every listed operation that reads
-  data must map to at least one query pattern; unknown selectivity defaults to
-  `medium` and is flagged as an assumption.
-- **`migration_context.migration_kind`**: `greenfield` when no overlapping
-  table exists; `expand_contract` when an existing table or column changes
-  while old application versions may still run.
-- **`migration_context.stages`**: Defaults to the full
-  `["preflight", "expand", "backfill", "dual_write", "cutover", "contract",
-  "verify", "rollback"]` chain for `expand_contract`; the dual stages are
-  omitted only for purely additive greenfield work.
-- **Safety validation**: If the prompt requests a destructive operation (drop,
-  truncate, or a column rewrite on a large table) without staged rollout
-  language, default `zero_downtime_required` to `true` and surface the
-  conflict as an explicit open risk instead of complying silently.
+1. **State uncertainties first.** Write down what is unknown about cardinality,
+   retention, ownership, privacy, and access patterns. Record each as an
+   assumption or open question in the plan.
+2. **Model entities and invariants.** Define keys, foreign keys with a
+   deliberate `ON DELETE`, `NOT NULL`, `CHECK`, and `UNIQUE`. Anything that must
+   never be violated belongs in the database, not only in application code. Add
+   lifecycle columns the project uses. Mark every PII column with its retention
+   and deletion rule. Never store raw credentials: store a hash plus a lookup
+   prefix, or a reference to the secret manager.
+3. **Choose indexes from real access paths.** Each index names the query it
+   serves, its column order (equality columns first, then range or sort
+   columns), and its write cost. Consider partial and covering (`INCLUDE`)
+   indexes. Skip redundant ones: a `UNIQUE` constraint already creates an index,
+   and an index on `(a, b)` serves filters on `a` alone. No speculative indexes.
+4. **Pick lock-safe DDL** for every statement that touches an existing table
+   (see the reference below). Note each statement's lock and whether it
+   rewrites or scans the table.
+5. **Stage the migration.** Expand (additive only), backfill in bounded batches
+   keyed by primary key, cut over only after reconciliation passes, and contract
+   only after old application versions are retired. Never expand and contract
+   in the same release. Write the rollback for each stage before any stage runs.
+   The rollout mechanics belong to the `safe-migration` skill.
+6. **Define verification queries before any production action:** missing rows,
+   invariant violations, orphans, sampled value equivalence, and replication
+   lag, each with a numeric acceptance threshold.
+7. **Align with the contract.** Check nullability, defaults, uniqueness, delete
+   behavior, and error behavior against the API contract and feature brief.
+   Send any forced contract change back through the `api-design` skill.
+8. **Write the plan** as the data-migration-plan handoff below, and trace every
+   table, index, and stage to a requirement or access pattern.
 
----
+## Lock-aware DDL on existing PostgreSQL tables
 
-## 2. Deterministic State Machine Execution Flow
+- `CREATE INDEX CONCURRENTLY` does not block writes, but it **cannot run inside
+  a transaction block**. Most migration tools wrap each migration in a
+  transaction by default, so that migration must opt out, for example Rails
+  `disable_ddl_transaction!`, Django `atomic = False`, Alembic
+  `op.get_context().autocommit_block()`, or Knex
+  `exports.config = { transaction: false }`. Check your tool's documentation.
+  Give each concurrent index its own migration. A failed concurrent build leaves
+  an `INVALID` index: drop it (`DROP INDEX CONCURRENTLY`) and retry.
+- A table created in the same migration is empty, so a plain `CREATE INDEX`
+  there is fine and can stay inside the transaction.
+- `ADD COLUMN` that is nullable or has a constant default is a metadata change
+  (PostgreSQL 11+). A volatile default such as `clock_timestamp()` rewrites the
+  table.
+- Add foreign keys and `CHECK` constraints as `NOT VALID`, then run
+  `VALIDATE CONSTRAINT` separately; validation takes a lock that does not block
+  reads or writes.
+- To make a large column `NOT NULL`: add `CHECK (col IS NOT NULL) NOT VALID`,
+  validate it, then `SET NOT NULL` (PostgreSQL 12+ uses the valid check to skip
+  the full scan), then drop the check.
+- Changing a column type usually rewrites the table unless the types are binary
+  compatible (for example `varchar(50)` to `text`). Prefer a new column plus
+  backfill.
+- Set `lock_timeout` in DDL sessions so a blocked `ALTER` fails fast instead of
+  queuing and blocking every query behind it.
 
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
+## Reference example
 
-### Step 1: Context Ingestion & Uncertainty Declaration
-
-1. Read `AGENTS.md`, the feature brief, the API contract, the existing
-   schema, and the query paths that will touch the new or changed tables.
-2. Inspect the migration history and ORM models to learn the naming, type,
-   and index conventions already in use.
-3. State uncertainties about cardinality, retention, ownership, privacy, and
-   expected access patterns before designing; record each as an assumption or
-   open question in the plan.
-
-### Step 2: Entity & Invariant Modeling
-
-1. Model entities, keys, constraints, relationships, lifecycle fields
-   (`created_at`, `updated_at`, soft-delete markers), and ownership
-   boundaries.
-2. Prefer database-enforced invariants for critical integrity: primary keys,
-   foreign keys with deliberate `ON DELETE` behavior, `NOT NULL`, `CHECK`
-   constraints, and uniqueness constraints over application-only enforcement.
-3. Mark every PII-bearing column explicitly and tie it to a retention and
-   deletion policy in the plan.
-
-### Step 3: Index Selection from Real Access Paths
-
-1. Choose indexes from real query predicates, ordering requirements, join
-   paths, and expected volume — never speculatively.
-2. Explain each index in the plan: which query pattern it serves, its column
-   order rationale, and its estimated write-amplification cost.
-3. Prefer partial or covering indexes where they shrink index size; reject
-   redundant indexes already implied by existing constraints.
-
-### Step 4: Staged Migration Plan Construction
-
-1. Produce the staged plan: preflight, expand, backfill, dual-read or
-   dual-write if needed, cutover, contract, verification, and rollback.
-2. The **expand** stage adds new structures compatibly: nullable columns or
-   columns with safe defaults, new tables, and `CREATE INDEX CONCURRENTLY`.
-3. The **backfill** stage copies or derives data in bounded batches keyed by
-   primary key ranges, never in one monolithic transaction.
-4. The **cutover** stage flips reads and writes to the new structure only
-   after reconciliation passes; the **contract** stage removes legacy
-   structures only after the old application version is fully retired.
-5. Use the `safe-migration` skill when it provides deeper guidance for the
-   rollout mechanics.
-
-### Step 5: Operational Risk Assessment
-
-1. Assess lock duration per statement against the lock-timeout budget,
-   transaction size, backfill batching, replication lag, and deploy ordering
-   relative to application releases.
-2. Classify every statement by lock mode and confirm no `ACCESS EXCLUSIVE`
-   statement holds longer than the budget on a hot table.
-3. Verify every stage is independently reversible and that the rollback path
-   is written down before any stage executes.
-
-### Step 6: Validation & Reconciliation Query Definition
-
-1. Define data validation and reconciliation queries — counts, checksums,
-   null-fraction checks, orphan detection, and invariant checks — **before**
-   any production action.
-2. Pair every backfill with a reconciliation query whose acceptance threshold
-   is stated numerically (exact match or an explicitly bounded delta).
-
-### Step 7: Contract & Brief Alignment
-
-1. Keep the API contract and feature brief aligned with nullability,
-   defaults, uniqueness, deletion behavior, and error behavior implied by the
-   schema.
-2. Flag any schema decision that forces a contract change (e.g. a newly
-   required field) back to the `api-design` output before proceeding.
-
-### Step 8: Plan Handoff Assembly
-
-1. Capture the proposal in `templates/handoffs/data-migration-plan.md` or the
-   project's equivalent, including assumptions, stage ordering, exact
-   verification evidence requirements, and rollback instructions.
-2. Cross-check that every entity, index, and stage traces to a stated
-   requirement or access pattern.
-
----
-
-## 3. Reference Implementation: PostgreSQL DDL & Staged Migration Sketch
-
-The following demonstrates the expected depth: core DDL with per-decision
-rationale comments, followed by a staged expand/backfill sketch with bounded
-batches and lock-timeout discipline.
+Illustrative PostgreSQL. Migration 1 creates new, empty tables, so plain
+`CREATE INDEX` is safe inside the tool's transaction. `gen_random_uuid()` is
+built in from PostgreSQL 13; `digest()` needs the `pgcrypto` extension.
 
 ```sql
--- ============================================================
--- Stage: EXPAND — additive, zero-downtime compatible.
--- Rationale comments explain each decision for reviewers.
--- ============================================================
-
--- api_keys: one row per issued key. Ownership is team-scoped so that
--- authorization queries filter on team_id without an extra join.
 CREATE TABLE api_keys (
-    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    team_id         uuid        NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
-    -- ON DELETE RESTRICT: deleting a team with live keys must fail loudly,
-    -- not silently orphan or cascade-revoke credentials.
-    name            text        NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
-    key_prefix      text        NOT NULL CHECK (char_length(key_prefix) = 8),
-    -- Store only prefix + hash; the raw secret is never persisted.
-    key_hash        bytea       NOT NULL,
-    status          text        NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'revoked', 'expired')),
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    revoked_at      timestamptz,
-    -- Lifecycle CHECK pairs the status with its timestamp.
+    id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- RESTRICT: deleting a team with live keys must fail loudly, not
+    -- silently orphan or cascade-revoke credentials.
+    team_id    uuid        NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
+    name       text        NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
+    -- Store a lookup prefix and a hash; the raw secret is never persisted.
+    key_prefix text        NOT NULL CHECK (char_length(key_prefix) = 8),
+    key_hash   bytea       NOT NULL,
+    status     text        NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active', 'revoked', 'expired')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    revoked_at timestamptz,
+    -- Revoked keys always have a revocation time, and only revoked keys do.
     CHECK ((status = 'revoked') = (revoked_at IS NOT NULL)),
-    -- Uniqueness on prefix supports fast lookup at authentication time.
+    -- Authentication looks keys up by prefix; the constraint creates the index.
     CONSTRAINT api_keys_prefix_unique UNIQUE (key_prefix)
 );
 
--- Serves query pattern "list active keys for a team" (per_request,
--- high selectivity on team_id). Column order matches equality-then-sort.
-CREATE INDEX CONCURRENTLY api_keys_team_active_idx
+-- Serves "list a team's active keys, newest first" (every request).
+-- Equality column first, then the sort column; partial to stay small.
+CREATE INDEX api_keys_team_active_idx
     ON api_keys (team_id, created_at DESC)
     WHERE status = 'active';
 
--- api_key_usage: append-only usage events, partitioned by month so that
--- retention drops whole partitions instead of running mass DELETEs.
+-- Append-only usage, partitioned by month so retention drops partitions
+-- instead of running mass DELETEs. Create partitions ahead of time (a
+-- scheduled job or pg_partman); an insert with no matching partition fails.
 CREATE TABLE api_key_usage (
     api_key_id    uuid        NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
     recorded_at   timestamptz NOT NULL,
     request_count integer     NOT NULL CHECK (request_count >= 0),
-    PRIMARY KEY (api_key_id, recorded_at)
+    PRIMARY KEY (api_key_id, recorded_at)  -- must include the partition key
 ) PARTITION BY RANGE (recorded_at);
 
-CREATE TABLE api_key_usage_2026_08 PARTITION OF api_key_usage
-    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE api_key_usage_2026_10 PARTITION OF api_key_usage
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+```
 
--- ============================================================
--- Stage: BACKFILL — bounded batches, lock-timeout discipline.
--- legacy_tokens -> api_keys, advanced by primary-key ranges only.
--- ============================================================
-SET lock_timeout = '3s';
+Backfill batch from `legacy_tokens`, run by a job rather than a schema
+migration. The runner starts with the nil UUID and passes the returned
+`next_cursor` as `$1` until no row comes back.
+
+```sql
+SET lock_timeout = '3s';        -- example budgets; use the project's
 SET statement_timeout = '30s';
 
 WITH batch AS (
-    SELECT id, team_id, left(key_material, 8) AS key_prefix,
-           digest(key_material, 'sha256') AS key_hash
+    SELECT id, team_id, key_material, created_at
     FROM legacy_tokens
-    WHERE id > $1               -- last processed key from the prior batch
+    WHERE id > $1 AND status = 'active'
     ORDER BY id
-    LIMIT 5000                  -- bounded batch: fits lock and lag budgets
+    LIMIT 5000                  -- bounded: sized to lock and replica-lag budgets
+),
+ins AS (
+    INSERT INTO api_keys (id, team_id, name, key_prefix, key_hash, status, created_at)
+    SELECT id, team_id, 'Legacy token', left(key_material, 8),
+           digest(key_material, 'sha256'), 'active', created_at
+    FROM batch
+    ON CONFLICT (id) DO NOTHING -- idempotent: re-running a batch is safe
 )
-INSERT INTO api_keys (id, team_id, key_prefix, key_hash, status, created_at)
-SELECT id, team_id, key_prefix, key_hash, 'active', now()
-FROM batch
-ON CONFLICT (id) DO NOTHING;    -- idempotent: safe to re-run the same batch
-
--- Stage: CONTRACT (only after cutover verifies and old app versions retire)
--- DROP TABLE legacy_tokens;  -- requires explicit operator authorization
+SELECT id AS next_cursor FROM batch ORDER BY id DESC LIMIT 1;
 ```
 
----
-
-## 4. Validation & Reconciliation Query Pattern
-
-Every backfill and cutover ships with executable reconciliation queries whose
-acceptance thresholds are numeric and stated in the plan.
+Verification queries with acceptance thresholds:
 
 ```sql
--- 1. Row-count reconciliation: source vs target must match exactly.
-SELECT
-    (SELECT count(*) FROM legacy_tokens WHERE status = 'active') AS source_rows,
-    (SELECT count(*) FROM api_keys)                              AS target_rows;
--- Acceptance: source_rows = target_rows
+-- 1. Preflight: legacy prefixes that would violate api_keys_prefix_unique.
+SELECT left(key_material, 8) AS prefix, count(*)
+FROM legacy_tokens WHERE status = 'active'
+GROUP BY 1 HAVING count(*) > 1;
+-- Accept: no rows (otherwise choose a longer prefix before backfilling)
 
--- 2. Invariant check: no active key may lack a hash or violate prefix length.
-SELECT count(*) AS invariant_violations
-FROM api_keys
-WHERE status = 'active'
-  AND (key_hash IS NULL OR char_length(key_prefix) <> 8);
--- Acceptance: invariant_violations = 0
+-- 2. Missing rows after the backfill.
+SELECT count(*) AS missing
+FROM legacy_tokens t
+WHERE t.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.id = t.id);
+-- Accept: missing = 0
 
--- 3. Orphan detection: every usage row must reference a live key row.
+-- 3. Sampled value equivalence (block sample of about 1% of pages).
+SELECT count(*) AS mismatches
+FROM legacy_tokens t TABLESAMPLE SYSTEM (1)
+JOIN api_keys k ON k.id = t.id
+WHERE k.key_hash <> digest(t.key_material, 'sha256');
+-- Accept: mismatches = 0
+
+-- 4. Orphans: needed only where a foreign key is missing or NOT VALID.
 SELECT count(*) AS orphan_usage_rows
 FROM api_key_usage u
 LEFT JOIN api_keys k ON k.id = u.api_key_id
 WHERE k.id IS NULL;
--- Acceptance: orphan_usage_rows = 0
+-- Accept: orphan_usage_rows = 0
 
--- 4. Sampled value equivalence: a 1% random sample must hash-match source.
-SELECT count(*) AS mismatches
-FROM (
-    SELECT t.id, t.key_material
-    FROM legacy_tokens t TABLESAMPLE SYSTEM (1)
-) s
-JOIN api_keys k ON k.id = s.id
-WHERE k.key_hash <> digest(s.key_material, 'sha256');
--- Acceptance: mismatches = 0
-
--- 5. Replication lag guard before cutover (run on the primary).
-SELECT client_addr,
+-- 5. Replica lag, on the primary, before cutover.
+SELECT application_name,
        pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_bytes
 FROM pg_stat_replication;
--- Acceptance: lag_bytes < 16 MiB for every replica before cutover proceeds
+-- Accept: below the project's limit on every replica (for example 16 MiB)
 ```
 
----
+The contract stage (`DROP TABLE legacy_tokens`) appears in the plan only behind
+an explicit approval point, after cutover is verified and old versions retire.
 
-## 5. Lock, Backfill & Compatibility Invariants
+## Guardrails
 
-$$t_{\text{lock}}(s) \le B_{\text{lock}} = 3000\text{ms} \quad \forall\, \text{statement } s \in \text{migration}$$
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions.
+  This skill never runs migrations, backfills, or rollback SQL against shared or
+  production databases; it hands the plan to the operator.
+- Never weaken a test, check, or threshold to make work pass.
+- `DROP`, `TRUNCATE`, and column rewrites on populated tables appear in a plan
+  only behind an approval point with a rehearsed rollback.
+- Plan migration statements for a role with DDL rights on the target schema,
+  not a superuser.
+- Keep credentials and connection strings out of plans; use placeholders.
 
-$$|B_{\text{batch}}| \le \min\!\left(5000\ \text{rows},\ \frac{B_{\text{txn}}}{w_{\text{row}}}\right), \qquad t_{\text{batch}} \le 30\text{s}$$
+## Verification
 
-$$\text{lag}_{\text{replica}} = \mathrm{pg\_wal\_lsn\_diff}(\text{primary}_{lsn}, \text{replay}_{lsn}) < 16\ \text{MiB at cutover}$$
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
-$$\forall\, t \in [\text{expand}, \text{contract}): \quad \text{AppVersion}_{old}(\text{schema}_t)\ \text{remains operable (backward compatible)}$$
+- The migration tool's own check or lint passes on the new migration files.
+- Each stage applies cleanly to a disposable database built from the current
+  schema (for example `psql "$SCRATCH_DATABASE_URL" -v ON_ERROR_STOP=1 -f stage.sql`),
+  and its down migration works there if the tool has one.
+- The verification queries return their accepted values on seeded scratch data.
+- `EXPLAIN` of each access-pattern query uses the intended index on realistic
+  data volumes (an empty table always gets a sequential scan).
+- The project's schema-dependent tests pass.
 
-$$\text{reconciled} \iff \bigl|\,\text{count}(\text{source}) - \text{count}(\text{target})\,\bigr| = 0 \ \wedge\ \text{invariantViolations} = 0$$
+## Report
 
----
+- **Schema:** tables and columns with per-table and per-index rationale.
+- **Invariants:** what the database enforces and what remains in application code.
+- **Access paths:** each query pattern and the index that serves it.
+- **Lock assessment:** each statement's lock, rewrite or scan, and timeout budget.
+- **Not verified:** checks that could not run and why.
 
-## 6. Guardrails
+Save the plan where the project keeps design documents (for example
+`docs/migrations/`); ask if there is no convention.
 
-### Operational Restrictions
+<!-- handoff: data-migration-plan -->
+```markdown
+# Data migration plan: [change name]
 
-- **Design and Verify Only**: This skill designs and verifies migrations; it
-  **never runs a production migration or destructive data operation** without
-  explicit authorization from the operator.
-- **Staged Backward Compatibility**: Preserve backward compatibility through
-  staged changes whenever multiple versions of an application may run
-  concurrently against the same database; never expand and contract in the
-  same release.
-- **No Speculative Indexes**: Every index must trace to a real, stated query
-  pattern; speculative "just in case" indexes are rejected.
-- **Single-Agent Executable**: A migration-planner subagent may independently
-  inspect the design, but it is optional and this workflow remains usable by
-  one agent end to end.
+## Current and target state
+## Preflight
+## Rollout
+## Rollback
+## Verification
+## Handoff
 
-### Security Invariants
-
-- **No Secret Material at Rest**: Never design storage for raw credentials;
-  store hashes, prefixes, or references into the project's secret manager
-  instead.
-- **PII Explicitness**: Every PII column must be marked in the plan with a
-  retention and deletion policy; undocumented PII storage is a design defect.
-- **Least-Privilege Migration Role**: Migration statements assume a role with
-  DDL rights only on the target schema, never superuser-by-default.
-- **Destructive Operation Gate**: `DROP`, `TRUNCATE`, and column rewrites on
-  populated tables appear in the plan only behind an explicit authorization
-  checkpoint with a rehearsed rollback path.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying files, capture a baseline list of modified and
-untracked files. If any verification command in Section 8 fails and cannot be
-resolved within 2 iterations, execute targeted rollback restricted ONLY to
-files created or modified during this run:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
+**Changed contract:** nullability, defaults, uniqueness, and API effects.
+**Files / systems affected:** schemas, migrations, services, and jobs.
+**Evidence and tests:** dry runs, query results, and EXPLAIN output.
+**Risks / rollback:** locks, data-loss risks, and the recovery path per stage.
+**What the next agent needs:** approvals, sequencing, and open questions.
 ```
 
-After executing targeted rollback, output the exact error trace and state
-failure causes. Never roll back migration files that were not created by this
-run, and never execute database-level rollback SQL without explicit
-authorization.
+## Optional delegation
 
----
-
-## 8. Verification Plan & PostgreSQL Toolchain Commands
-
-Execute the following commands using project-local runners; adapt to the
-project's declared migration and database tooling:
-
-```bash
-# 1. Lint/validate migration files with the project's migration tool
-npx --no-install drizzle-kit check        # or: alembic check / atlas lint
-
-# 2. Dry-run each stage against a scratch database, failing on any error
-psql "$SCRATCH_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/<stage>.sql
-
-# 3. Execute reconciliation queries and assert zero-delta acceptance
-psql "$SCRATCH_DATABASE_URL" -v ON_ERROR_STOP=1 -f checks/reconcile.sql
-
-# 4. Run the project's test suite (schema-dependent integration tests)
-npm run test
-```
-
----
-
-## 9. Completion Report
-
-The final report must contain: the proposed schema with per-table and
-per-index rationale, the database-enforced invariants, the access-path
-analysis tying each index to a query pattern, the full staged rollout and
-rollback plan with lock and batch budgets, the validation and reconciliation
-queries with their numeric acceptance thresholds, dependencies on application
-deploys or contract changes, and every open risk and uncertainty that the
-operator must resolve before authorizing execution.
+The `database-architect` subagent can review the model, constraints, and
+indexes, and the `migration-planner` subagent can audit the staged plan for
+compatibility and lock hazards, in parallel. One agent can complete this
+workflow alone.

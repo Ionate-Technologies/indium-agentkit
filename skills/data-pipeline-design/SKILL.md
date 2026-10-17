@@ -1,221 +1,111 @@
 ---
 name: data-pipeline-design
-description: "Design safe ETL/ELT pipelines, data warehouse schemas, partition strategies, idempotency controls, and data quality assertions before implementation."
+description: "Design batch or incremental ETL and ELT pipelines and warehouse models: grain, partitioning, idempotent loads, late-arriving data, data quality tests, PII controls, and cost monitoring, before building them. Use when adding or changing a dbt model, warehouse table, scheduled transformation, or ingestion job. Not for transactional schema design (use the database-design skill) or event-sourced stores (use the event-sourcing-architecture skill)."
 ---
 
 # Data Pipeline Design
 
-Design scalable, idempotent data transformation pipelines and warehouse data
-models before implementation. PostgreSQL, BigQuery, Snowflake, and DuckDB are
-the supported warehouse patterns, with dbt, SQL, Spark, or Python as the
-transformation layer; inspect the repository and follow the consumer project's
-established data warehouse stack, orchestrator, and transformation framework
-before designing anything.
+Produce a pipeline specification that a builder can implement without guessing:
+target models with a declared grain, a load strategy that is safe to re-run,
+quality tests that gate publishing, and PII controls. The stance is
+**idempotent by construction, design before build**: every run can be repeated
+and yields the same target state, and this skill never runs production loads,
+backfills, or full refreshes without approval.
 
-The skill is **design-first**: the output is a pipeline specification covering
-target schemas, partitioning, transformation logic, idempotency controls,
-quality assertions, and governance controls, captured in the project's agreed
-architecture handoff. It does not execute production pipelines.
+Follow the project's warehouse (PostgreSQL, BigQuery, Snowflake, DuckDB, or
+other), transformation framework (dbt, SQL, Spark, Python), and orchestrator.
 
----
+## When to use
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+- A new or changed dbt model, warehouse table, or scheduled transformation.
+- A new ingestion job from an operational database, API, files, or a stream.
+- Duplicates, missed late updates, or cost blowups in an existing pipeline that
+  call for a redesign of the load strategy.
 
-The skill supports **two invocation modes**:
+## When not to use
 
-1. **Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context
-   manifest below.
-2. **Non-Technical Mode (Plain English Prompts)**: If the user provides a
-   natural language prompt (e.g. *"Design a daily pipeline that loads payment
-   charges into a finance fact table with dedup and freshness checks"*), the
-   agent **must automatically infer and populate** `source_spec`,
-   `target_model_context`, `orchestration_context`, and `quality_context`
-   from the user's text and the existing repository conventions.
+- Transactional (OLTP) tables and indexes: use the `database-design` skill.
+- Changing an operational table that live services depend on: use the
+  `safe-migration` skill.
+- A single slow existing query: use the `query-optimization` skill.
+- Test or demo data: use the `synthetic-data-generation` skill.
+- Independent review of a pipeline design: delegate to the `data-engineer`
+  subagent.
 
-### JSON Context Manifest Schema
+## Inputs to gather
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DataPipelineDesignContextManifest",
-  "type": "object",
-  "required": ["source_spec", "target_model_context", "quality_context"],
-  "properties": {
-    "source_spec": {
-      "type": "object",
-      "required": ["source_system", "ingest_mode"],
-      "properties": {
-        "source_system": { "type": "string" },
-        "ingest_mode": { "type": "string", "enum": ["full_refresh", "incremental_watermark", "cdc", "append_only"] },
-        "watermark_column": { "type": "string" },
-        "estimated_daily_rows": { "type": "integer", "minimum": 0 },
-        "contains_pii": { "type": "boolean", "default": false },
-        "source_latency_sla_minutes": { "type": "integer", "minimum": 1 }
-      }
-    },
-    "target_model_context": {
-      "type": "object",
-      "required": ["modeling_style", "warehouse_engine"],
-      "properties": {
-        "modeling_style": { "type": "string", "enum": ["star", "snowflake", "one_big_table"] },
-        "warehouse_engine": { "type": "string", "enum": ["postgresql", "bigquery", "snowflake", "duckdb"] },
-        "partition_key": { "type": "string" },
-        "clustering_fields": { "type": "array", "items": { "type": "string" }, "maxItems": 4 },
-        "grain": { "type": "string" }
-      }
-    },
-    "orchestration_context": {
-      "type": "object",
-      "required": ["orchestrator", "schedule"],
-      "properties": {
-        "orchestrator": { "type": "string", "enum": ["airflow", "dagster", "dbt_cloud", "cron", "other"] },
-        "schedule": { "type": "string" },
-        "freshness_sla_minutes": { "type": "integer", "minimum": 1 },
-        "max_bytes_scanned_per_run": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "quality_context": {
-      "type": "object",
-      "required": ["assertions"],
-      "properties": {
-        "assertions": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "type": "string", "enum": ["not_null", "unique", "referential_integrity", "accepted_values", "row_count_threshold", "freshness", "custom_sql"] }
-        },
-        "failure_policy": { "type": "string", "enum": ["block_publish", "warn_and_publish"], "default": "block_publish" },
-        "min_coverage_ratio": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 }
-      }
-    }
-  }
-}
-```
+Discover these before asking. Ask only about what remains ambiguous.
 
-### Automatic Natural Language Inference Rules
+- Warehouse engine, framework, and orchestrator, from `dbt_project.yml`,
+  profiles and targets, and the orchestrator's DAG or job definitions.
+- Each source: system, volume, and change pattern (append-only, updates in
+  place, hard deletes, CDC feed); which timestamps exist and whether they are
+  reliable; how late data can arrive.
+- Downstream consumers, their query patterns, and the freshness they need.
+- PII classification, retention, erasure obligations, and the governance owner.
+- Cost constraints: compute or bytes-scanned budget per run, if the project has one.
 
-If no raw JSON payload is provided, apply these defaults and safety checks:
+## Workflow
 
-- **`source_spec`**: The source system is extracted from the prompt (e.g.
-  "payment charges"). `ingest_mode` defaults to `incremental_watermark` when a
-  monotonic timestamp exists in the source, otherwise `append_only` with a
-  deduplication window.
-- **`target_model_context`**: `modeling_style` defaults to `star` for
-  analytics workloads with clear fact/dimension separation, and to
-  `one_big_table` for single-entity reporting. `warehouse_engine`, partition
-  key, and clustering fields are detected from existing dbt project files and
-  warehouse DDL in the repository.
-- **`orchestration_context`**: Detected from existing orchestrator config
-  (`airflow/`, `dagster.yaml`, `dbt_project.yml`). `freshness_sla_minutes`
-  defaults to 1.5x the schedule interval when not stated explicitly.
-- **`quality_context.assertions`**: Defaults to `not_null` and `unique` on the
-  declared grain, plus `freshness` on the partition key; PII sources add
-  masking-verification checks.
-- **Safety validation**: If the prompt implies PII movement without governance
-  language, default `contains_pii` to `true` and require explicit masking
-  decisions in the design; surface the conflict as an open risk rather than
-  omitting governance silently.
-
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution
-ordering.
-
-### Step 1: Context Ingestion & Constraint Declaration
-
-1. Read `AGENTS.md`, the feature brief, the source schema, the target
-   warehouse model, and the downstream query patterns.
-2. State constraints regarding data volume, latency SLA, privacy, and
-   retention before designing; record unknowns as assumptions or open
-   questions in the handoff.
-
-### Step 2: Target Schema Modeling
-
-1. Model target tables using the appropriate dimensional schema (star,
-   snowflake, or One Big Table) for the stated query patterns.
-2. Define primary keys, foreign keys, partition keys, clustering fields, and
-   data types; declare the grain of every fact table in one sentence.
-3. Choose the partition key from actual filter predicates (usually the event
-   date), and clustering fields from the highest-selectivity join or filter
+1. **State constraints and unknowns:** volume, freshness need, privacy,
+   retention, and late-arrival behavior. Record guesses as assumptions.
+2. **Declare the grain** of every target table in one sentence ("one row per
+   charge"). Choose a star schema or a wide table from the consumers' query
+   patterns, and trace every target column to a source field or a documented
+   derivation.
+3. **Partition and cluster.** Partition by the column most queries filter on
+   (usually the event date). Cluster on the highest-selectivity filter or join
    columns.
+4. **Pick the load strategy:**
+   - Full refresh for small tables.
+   - Incremental merge on a unique key when rows can change after load.
+   - Insert-overwrite of recent partitions: cheaper, but correct only when
+     changes land in those partitions.
+   - Append with deduplication for immutable events.
+   - CDC apply when the source hard-deletes rows; timestamp-based increments
+     never see deletes, so otherwise schedule a periodic reconciliation.
+5. **Design the watermark and late data.** Derive the watermark from the target
+   (for example `max(updated_at)`) minus a lookback sized to observed lateness,
+   so a failed run is recovered by the next one. State what happens to rows
+   older than the lookback.
+6. **Make every run idempotent and deterministic.** Merge on stable keys,
+   deduplicate within each batch (a merge fails or duplicates when the source
+   has several rows per key), break ties with a deterministic column, and keep
+   the run clock (`current_timestamp`) out of business columns.
+7. **Design quality tests and their failure policy.** At minimum: `not_null`
+   and `unique` on the grain, relationships to dimensions, accepted values,
+   ranges, a volume check, and source freshness. Failing `error` tests block
+   publishing or downstream models; `warn` tests notify.
+8. **Design PII handling.** Classify every source column and drop what
+   consumers do not need. Plain `sha256(email)` is pseudonymization, not
+   anonymization: anyone holding a list of candidate emails can hash them and
+   match (a dictionary attack). Use a keyed HMAC with a key from the secret
+   manager, computed at ingestion before data lands in the warehouse, or the
+   warehouse's keyed or deterministic-encryption functions if it has them. The
+   output is still personal data, so erasure requests must still reach raw and
+   curated layers. Restrict any raw PII columns with column-level access
+   policies.
+9. **Plan monitoring and cost:** row counts per run, duration, bytes scanned,
+   schema drift, and failure alerts, with budgets from the project.
+10. **Plan the rollout:** initial backfill (cost estimate, run in chunks),
+    schedule, consumer cutover, and rollback. Write it as the handoff below.
 
-### Step 3: Extraction & Transformation Logic Design
+## Reference example: incremental dbt model
 
-1. Design extraction and transformation logic in the project's established
-   framework (dbt, SQL, Spark, or Python).
-2. Enforce idempotency so that pipeline re-runs produce identical results
-   without duplicate rows: `MERGE` on stable keys, partition replacement, or
-   delete-and-insert bounded to the reprocessed window.
-3. Keep transformations deterministic: no unkeyed `INSERT ... SELECT` into
-   shared targets, and no dependence on row arrival order.
-
-### Step 4: Incremental Loading Strategy
-
-1. Define the incremental loading strategy: watermark columns, change data
-   capture, or append-only with a deduplication window.
-2. Size the lookback/dedup window to cover late-arriving data without
-   rescanning history; the goal is minimal compute cost and warehouse lock
-   time per run.
-3. Specify exactly how the watermark advances after success and how it is
-   recovered after a failed run.
-
-### Step 5: Data Quality Assertion Design
-
-1. Establish data quality assertions — non-null, uniqueness, referential
-   integrity, accepted values, and custom threshold checks — to run before
-   and after transformation.
-2. Wire assertions to a failure policy: `block_publish` assertions gate the
-   load; `warn_and_publish` assertions page for review without stopping data.
-3. Set a coverage target: every fact table's grain carries at least
-   `not_null` and `unique` assertions, and every PII column carries a masking
-   verification.
-
-### Step 6: PII Governance & Access Control Design
-
-1. Design PII handling: classification of every source column, masking or
-   hashing at ingestion, column-level access controls in the warehouse, and
-   data-deletion compliance hooks (subject-erasure propagation) in accordance
-   with the project's data governance policies.
-2. Ensure raw PII never lands in the curated layer unmasked; document the
-   masking function and its key management story in the handoff.
-
-### Step 7: Monitoring & Cost Observability Design
-
-1. Plan pipeline monitoring: record counts, execution duration, byte scan
-   volume, schema drift detection, and failure alert notifications.
-2. Define the bytes-scanned budget per run and the alert threshold; tie cost
-   observability to the orchestrator's metadata or the warehouse's query
-   history.
-
-### Step 8: Pipeline Specification Handoff
-
-1. Record the pipeline specification, schema design, data quality checks,
-   idempotency mechanism, governance controls, and operational risks in the
-   agreed architecture handoff.
-2. Cross-check that every target column traces to a source field or a
-   documented derivation, and that every assertion traces to a stated quality
-   or compliance requirement.
-
----
-
-## 3. Reference Implementation: Idempotent dbt Model with Partition DDL
-
-The following demonstrates the expected depth: an incremental dbt-style model
-with watermark logic and an idempotent merge, plus the warehouse DDL for
-partitioning and clustering.
+Illustrative dbt on BigQuery; adapt functions and config to the project's
+adapter. The source already carries `customer_email_token`, computed at
+ingestion.
 
 ```sql
--- models/facts/fct_charges.sql
--- Grain: one row per charge_id. Idempotent via MERGE on charge_id within
--- the reprocessed watermark window.
+-- models/marts/fct_charges.sql
+-- Grain: one row per charge_id.
 {{
   config(
-    materialized = 'incremental',
-    unique_key = 'charge_id',
-    incremental_strategy = 'merge',
-    partition_by = {'field': 'charge_date', 'data_type': 'date'},
-    cluster_by = ['customer_id', 'status']
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key='charge_id',
+    partition_by={'field': 'charge_date', 'data_type': 'date'},
+    cluster_by=['customer_id', 'status']
   )
 }}
 
@@ -223,246 +113,197 @@ with source as (
     select
         charge_id,
         customer_id,
-        cast(created_at as date)          as charge_date,
+        date(created_at) as charge_date,
         amount_cents,
         currency,
         status,
-        -- PII: email is hashed at ingestion; raw email never enters the
-        -- curated layer. Key management lives in the secret manager.
-        sha256(lower(trim(email)))        as customer_email_hash,
+        customer_email_token,
         created_at,
         updated_at
     from {{ source('payments', 'charges') }}
     {% if is_incremental() %}
-    -- Watermark window: reprocess the last 3 days to absorb late updates
-    -- without rescanning full history.
+    -- Reprocess a 3-day lookback from the newest row already loaded, so late
+    -- updates are absorbed and a failed run is recovered by the next run.
     where updated_at >= (
-        select date_sub(max(charge_date), interval 3 day)
-        from {{ this }}
+        select timestamp_sub(max(updated_at), interval 3 day) from {{ this }}
     )
     {% endif %}
 ),
 
-deduped as (
-    -- Defensive dedup inside the window: keep the newest version per key.
-    select *
+ranked as (
+    -- A merge needs at most one source row per key: keep the newest version.
+    -- Add a tiebreaker column if updated_at can repeat for one charge.
+    select
+        *,
+        row_number() over (
+            partition by charge_id
+            order by updated_at desc
+        ) as version_rank
     from source
-    qualify row_number() over (
-        partition by charge_id
-        order by updated_at desc
-    ) = 1
 )
 
 select
-    charge_id,
-    customer_id,
-    charge_date,
-    amount_cents,
-    currency,
-    status,
-    customer_email_hash,
-    created_at,
-    updated_at
-from deduped
+    charge_id, customer_id, charge_date, amount_cents, currency, status,
+    customer_email_token, created_at, updated_at
+from ranked
+where version_rank = 1
 ```
 
-```sql
--- ddl/fct_charges.sql — target table DDL (BigQuery dialect shown; adapt to
--- the project's engine). Partitioning bounds scan cost; clustering
--- accelerates the dominant per-customer and per-status query patterns.
-CREATE TABLE IF NOT EXISTS analytics.fct_charges (
-    charge_id           STRING      NOT NULL,
-    customer_id         STRING      NOT NULL,
-    charge_date         DATE        NOT NULL,
-    amount_cents        INT64       NOT NULL,
-    currency            STRING      NOT NULL,
-    status              STRING      NOT NULL,
-    customer_email_hash BYTES,
-    created_at          TIMESTAMP   NOT NULL,
-    updated_at          TIMESTAMP   NOT NULL
-)
-PARTITION BY charge_date
-CLUSTER BY customer_id, status
-OPTIONS (
-    partition_expiration_days = 2555,   -- 7-year finance retention policy
-    require_partition_filter  = true     -- blocks unpartitioned full scans
-);
+On BigQuery a merge scans the target to match keys. If updates only ever land
+in recent partitions, `insert_overwrite` on those partitions (or
+`incremental_predicates`, where the adapter supports it) costs less; check the
+adapter documentation for your dbt version.
 
--- dim_customers (star-schema dimension) follows the same discipline:
--- clustered on customer_id, with PII columns masked by a dynamic data
--- policy so only the governance-approved role sees raw values.
+Keyed token at ingestion (illustrative Python):
+
+```python
+import hashlib
+import hmac
+
+
+def email_token(email: str, key: bytes) -> str:
+    """Keyed pseudonym for joins. Load the key from the secret manager."""
+    normalized = email.strip().lower()
+    return hmac.new(key, normalized.encode("utf-8"), hashlib.sha256).hexdigest()
 ```
 
----
-
-## 4. Data Quality Assertion Pattern (dbt Tests / GE-Style YAML)
-
-Assertions run before publish; `block_publish` failures gate the load.
+Quality tests. dbt 1.8 and later accept `data_tests:` (older versions use
+`tests:`), and recent versions prefer test inputs nested under `arguments:`;
+follow the syntax of the project's dbt version.
 
 ```yaml
-# models/facts/schema.yml
+# models/marts/schema.yml
 version: 2
+
+sources:
+  - name: payments
+    tables:
+      - name: charges
+        loaded_at_field: updated_at
+        freshness:
+          warn_after: {count: 12, period: hour}
+          error_after: {count: 24, period: hour}
 
 models:
   - name: fct_charges
-    description: One row per charge; grain is charge_id.
-    tests:
-      # Row-count threshold: a run landing under 50% of the trailing 7-day
-      # median volume indicates an upstream extract failure.
+    description: One row per charge.
+    data_tests:
       - dbt_utils.expression_is_true:
-          expression: >
-            count(*) >= 0.5 * (
-              select percentile_cont(0.5) within group (order by daily_rows)
-              from analytics_metrics.fct_charges_daily_volume
-            )
-          config:
-            severity: error
+          expression: "customer_email_token is null or length(customer_email_token) = 64"
     columns:
       - name: charge_id
-        tests:
-          - not_null
-          - unique
+        data_tests: [not_null, unique]
       - name: customer_id
-        tests:
+        data_tests:
           - not_null
           - relationships:
               to: ref('dim_customers')
               field: customer_id
       - name: status
-        tests:
+        data_tests:
           - accepted_values:
               values: ['succeeded', 'pending', 'failed', 'refunded']
       - name: amount_cents
-        tests:
+        data_tests:
           - dbt_utils.expression_is_true:
-              expression: "amount_cents >= 0"
-      - name: customer_email_hash
-        description: PII governance: only the hashed form may appear here.
-        tests:
-          - dbt_utils.expression_is_true:
-              expression: "octet_length(customer_email_hash) = 32"
-
-# Freshness assertion on the source, evaluated by the orchestrator:
-sources:
-  - name: payments
-    tables:
-      - name: charges
-        freshness:
-          warn_after: { count: 12, period: hour }
-          error_after: { count: 24, period: hour }
-        loaded_at_field: updated_at
+              expression: ">= 0"  # column level: dbt_utils prepends the column name
 ```
 
----
+`expression_is_true` filters row by row, so it cannot check aggregates such as
+volume. Use a singular test, which fails when it returns any row:
 
-## 5. Idempotency, Freshness & Cost Invariants
+```sql
+-- tests/assert_fct_charges_volume.sql
+-- Fails when yesterday's rows fall below half the prior 7-day daily average.
+with daily as (
+    select charge_date, count(*) as row_count
+    from {{ ref('fct_charges') }}
+    where charge_date between date_sub(current_date(), interval 8 day)
+                          and date_sub(current_date(), interval 1 day)
+    group by charge_date
+),
 
-$$\text{Idempotency: } \forall\, w: \quad \text{state}(T \circ T(w)) = \text{state}(T(w)) \;\Rightarrow\; \text{no duplicates, no drift on re-run}$$
+baseline as (
+    select avg(row_count) as avg_rows
+    from daily
+    where charge_date < date_sub(current_date(), interval 1 day)
+)
 
-$$\text{Freshness: } t_{\text{now}} - \max(\text{loaded\_at}) \le \text{SLA}_{\text{freshness}} = 1.5 \times \text{scheduleInterval}$$
-
-$$\text{QualityCoverage} = \frac{\#\{\text{grain columns carrying not\_null} \wedge \text{unique assertions}\}}{\#\{\text{grain columns}\}} \ge 0.8$$
-
-$$\text{CostBudget: } \sum_{\text{run}} \text{bytesScanned} \le B_{\text{scan}}, \qquad \text{alert when } > 1.2 \times \text{P95}_{30d}$$
-
-$$\text{DuplicateGuard: } \forall\, k \in \text{grain keys}: \quad \text{count}(k) = 1 \text{ after every completed run}$$
-
----
-
-## 6. Guardrails
-
-### Operational Restrictions
-
-- **Idempotency by Construction**: Design for idempotency — every
-  transformation run must be safely re-runnable and produce identical target
-  state; reject any design that tolerates duplicate-producing re-runs.
-- **No Unauthorized Destructive Operations**: Do not execute destructive
-  table drops, mass deletes, or unpartitioned full table scans in production
-  without explicit authorization; partition-filter guards are the default,
-  not an option.
-- **Framework Conformance**: Use the project's established orchestrator and
-  transformation framework; never introduce a second orchestration system in
-  a single design.
-- **Single-Agent Executable**: An optional data-engineer subagent can inspect
-  schemas in parallel, but one agent can complete this workflow independently
-  end to end.
-
-### Security Invariants
-
-- **PII Governance First**: Every PII column is classified, masked or hashed
-  at ingestion, covered by column-level access controls, and wired to
-  deletion-compliance hooks in accordance with data governance policies; raw
-  PII never lands in the curated layer unmasked.
-- **No Secrets in Code or Logs**: Connection strings, API tokens, and
-  warehouse credentials live in the project's secret manager; designs
-  reference them by name (e.g. `<secret-ref>`) and never inline values.
-- **Least-Privilege Warehouse Roles**: Pipeline roles receive write access
-  only to their target schemas and read access only to declared sources.
-- **Auditability**: Every published table records load metadata (run id,
-  watermark window, row counts) sufficient to reconstruct what data moved and
-  when.
-
----
-
-## 7. Atomic Failure Recovery & Rollback Handler
-
-Before creating or modifying files, capture a baseline list of modified and
-untracked files. If any verification command in Section 8 fails and cannot be
-resolved within 2 iterations, execute targeted rollback restricted ONLY to
-files created or modified during this run:
-
-```bash
-# Revert ONLY modified files tracked during this execution run
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
-
-# Remove ONLY newly created untracked files from this execution run
-if [ -n "${CREATED_FILES:-}" ]; then
-  rm -rf ${CREATED_FILES} 2>/dev/null
-fi
+select b.avg_rows, coalesce(y.row_count, 0) as yesterday_rows
+from baseline as b
+left join daily as y
+    on y.charge_date = date_sub(current_date(), interval 1 day)
+where coalesce(y.row_count, 0) < 0.5 * b.avg_rows
 ```
 
-After executing targeted rollback, output the exact error trace and state
-failure causes. Never drop warehouse tables or re-run destructive
-transformations as part of rollback without explicit authorization.
+## Guardrails
 
----
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions:
+  production runs, backfills, `--full-refresh` (it rebuilds the table), table
+  drops, mass deletes, and unpartitioned full scans of large tables.
+- Never weaken a test, check, or threshold to make work pass. Do not downgrade
+  an `error` test to `warn` without the owner's agreement.
+- Raw PII never lands in curated layers. Keys and credentials stay in the
+  secret manager; designs refer to them by name.
+- Use the project's orchestrator and framework; do not introduce a second one.
+- Pipeline roles get write access only to their target schemas and read access
+  only to declared sources.
 
-## 8. Verification Plan & Data Toolchain Commands
+## Verification
 
-Execute the following commands using project-local runners; adapt to the
-project's declared data tooling:
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately against a development target, and
+report its real result; never chain alternatives with `||`.
 
-```bash
-# 1. Compile the transformation project (syntax and ref resolution)
-npx --no-install dbt compile              # or: dbt parse / sqlmesh plan
+- The project parses and compiles (for example `dbt parse`, then
+  `dbt compile --select fct_charges`).
+- The changed models build and their tests pass (for example
+  `dbt build --select fct_charges+ --target dev`).
+- Idempotency: running the incremental model twice with no new source data
+  leaves row counts unchanged and the grain tests passing.
+- Equivalence: an incremental build matches a `--full-refresh` build of the same
+  data in a development schema, checked with `EXCEPT DISTINCT` in both
+  directions (empty both ways).
+- Source freshness runs (for example `dbt source freshness`).
+- The project's lint and unit tests pass.
 
-# 2. Build the changed models against a scratch target
-npx --no-install dbt build --select state:modified+ --target scratch
+## Report
 
-# 3. Run data quality assertions (tests gate publish)
-npx --no-install dbt test --select state:modified+
+- **Models:** grain, columns and lineage, partitioning and clustering rationale.
+- **Load strategy:** watermark, lookback, merge keys, dedup, delete handling.
+- **Quality tests:** each test, its severity, and what it protects.
+- **PII controls:** classification, tokenization method and key ownership,
+  access policies, erasure path.
+- **Monitoring and cost:** metrics, alerts, and per-run budget.
+- **Not verified:** checks that could not run and why.
 
-# 4. Verify idempotency: run the incremental build twice, diff row counts
-npx --no-install dbt run --select <model> --target scratch && \
-npx --no-install dbt run --select <model> --target scratch && \
-psql "$SCRATCH_WAREHOUSE_URL" -f checks/idempotency_count.sql
+Write the specification as a data-migration-plan handoff: current and target
+state cover sources and target models, and rollout covers the initial backfill,
+schedule, and consumer cutover. Save it where the project keeps design
+documents (for example `docs/data/`); ask if there is no convention.
 
-# 5. Run the project's lint and unit test suite
-npm run lint && npm run test
+<!-- handoff: data-migration-plan -->
+```markdown
+# Data migration plan: [pipeline name]
+
+## Current and target state
+## Preflight
+## Rollout
+## Rollback
+## Verification
+## Handoff
+
+**Changed contract:** grain, columns, and semantics consumers will see.
+**Files / systems affected:** models, sources, jobs, and downstream dashboards.
+**Evidence and tests:** dev builds, test results, and equivalence checks.
+**Risks / rollback:** backfill cost, late data, PII exposure, and the revert path.
+**What the next agent needs:** approvals, schedule, and open questions.
 ```
 
----
+## Optional delegation
 
-## 9. Completion Report
-
-The final report must contain: the target schema design with grain,
-partitioning, and clustering rationale; the transformation logic and its
-idempotency mechanism (watermark window, merge keys, dedup strategy); the
-incremental loading strategy with cost analysis; the complete set of quality
-assertions with their failure policies and coverage ratio; the PII governance
-controls (classification, masking, access, deletion hooks); the monitoring and
-alerting plan including the bytes-scanned budget; and every operational risk
-and open question that must be resolved before the pipeline is built or
-scheduled.
+The `data-engineer` subagent can review the design or existing models for
+idempotency, quality coverage, and governance gaps; verify its findings before
+acting. One agent can complete this workflow alone.

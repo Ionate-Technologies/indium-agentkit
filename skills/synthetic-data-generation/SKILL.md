@@ -1,252 +1,260 @@
 ---
 name: synthetic-data-generation
-description: Implement deterministic scripts to populate databases with referentially solid, PII-free data.
+description: "Write deterministic seed scripts that fill development, test, demo, or load-test databases with synthetic, referentially intact data that contains no real personal data, with realistic skew and checked integrity. Use when a project needs seed data, fixtures, demo data, or data volume for performance tests. Not for copying or masking production data, and not for load-test scenario design (use the load-testing-suite skill)."
 ---
 
 # Synthetic Data Generation
 
-Implement deterministic, high-performance data generation scripts and seed pipelines to populate development, staging, and load-testing databases with referentially intact, distribution-accurate, and 100% PII-free mock data.
+Produce seed scripts that generate the same realistic, fully synthetic dataset
+on every run, in dependency order, and prove its integrity before claiming it.
+The stance is **synthetic only, reproducible, verified**: same seed, same faker
+version, and same reference date give the same data, and "integrity verified"
+is printed only after the checks run.
 
-The skill is **privacy-first and topologically ordered**: entity-relationship graphs, foreign key dependencies, batch insert sizes, statistical skew distributions, and RFC-compliant privacy masking are verified before generating data.
+## When to use
 
----
+- Seed data for local development, CI fixtures, or demo environments.
+- Data volume for load tests, query-plan checks, or pagination testing.
+- Replacing a habit of copying production data into lower environments.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- A request to dump, copy, or sample production data into a lower environment:
+  decline and offer the alternatives in Guardrails.
+- Designing load-test scenarios and thresholds: use the `load-testing-suite` skill.
+- Designing or changing the schema itself: use the `database-design` skill.
+- Independent review of the generation design (dependency order, constraints,
+  distributions): delegate to the `synthetic-data-architect` subagent.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Generate a TypeScript seed script to populate 10,000 users and 50,000 orders with realistic purchase distributions"*), the agent **must automatically infer and populate** `target_engine`, `root_entity_count`, `child_entity_multiplier`, and `skew_model` from the user's text and repository ORM configuration.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these before asking. Ask only about what remains ambiguous.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "SyntheticDataGenContextManifest",
-  "type": "object",
-  "required": ["generator_spec", "volume_spec"],
-  "properties": {
-    "generator_spec": {
-      "type": "object",
-      "required": ["target_engine", "seed_library"],
-      "properties": {
-        "target_engine": { 
-          "type": "string", 
-          "enum": ["postgresql", "mysql", "sqlite", "prisma", "drizzle", "mongodb"] 
-        },
-        "seed_library": { 
-          "type": "string", 
-          "enum": ["faker_js", "mimesis", "factory_boy", "custom_generator"] 
-        },
-        "deterministic_seed": { "type": "integer", "default": 42 }
-      }
-    },
-    "volume_spec": {
-      "type": "object",
-      "required": ["root_entity_count"],
-      "properties": {
-        "root_entity_count": { "type": "integer", "default": 1000 },
-        "child_multiplier": { "type": "number", "default": 5.0 },
-        "batch_size": { "type": "integer", "default": 2500 }
-      }
-    },
-    "distribution_profile": {
-      "type": "object",
-      "properties": {
-        "skew_model": { "type": "string", "enum": ["zipfian", "gaussian", "uniform"], "default": "zipfian" },
-        "null_probability": { "type": "number", "default": 0.05 }
-      }
-    }
-  }
-}
-```
+- Schema source: Prisma schema, Drizzle or TypeORM models, SQL migrations, or
+  factories. Note foreign keys, unique and check constraints, enums, and
+  nullable columns.
+- Target database, and how to confirm it is disposable (local container, CI
+  service, per-branch database).
+- Volumes per table, ratios (orders per user), and distribution needs: skew,
+  null rates, date ranges, status mixes.
+- Existing seed tooling (for example `npx prisma db seed`, fixture loaders,
+  factory_boy) and the installed faker library and exact version.
 
-### Automatic Natural Language Inference & Safety Rules
+## Workflow
 
-If no raw JSON payload is provided, apply these defaults and strict safety checks:
+1. **Confirm the target is disposable.** Read the configured connection target
+   and show only the host and database name, never credentials. If it is not
+   obviously local or CI, ask. Never seed a shared or production database.
+2. **Order tables by dependency.** Topologically sort the foreign-key graph so
+   parents load before children. For cycles (a self-referencing `manager_id`,
+   or two tables that reference each other), insert with the foreign key null
+   and fill it in a second pass, or use deferrable constraints.
+3. **Make it deterministic.**
+   - Call `faker.seed(N)` once, before any generation.
+   - Call `faker.setDefaultRefDate(fixedDate)`: `faker.date.past()` and
+     `faker.date.recent()` are relative to the current time otherwise.
+   - Pin the exact faker version (no `^` range); the same seed can produce
+     different values across versions.
+   - Use no other randomness or clock (`Math.random`, `Date.now`,
+     `crypto.randomUUID`, database defaults such as `now()` or generated ids):
+     set ids and timestamps explicitly. Generate in a fixed order.
+4. **Derive unique values from the row index** (`user42@example.test`) instead
+   of retrying random draws; random values collide at volume.
+5. **Model distributions.** Skew parent selection with a Zipf sampler (below),
+   weight enum values, apply explicit null rates, and keep dates consistent
+   (an order never predates its user).
+6. **Keep everything obviously fake.** Emails on RFC 2606 reserved names
+   (`example.com`, `.test`); IPv4 from the RFC 5737 documentation ranges
+   (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) and IPv6 from
+   `2001:db8::/32`; phone numbers in the fictional 555-0100 to 555-0199 range;
+   card numbers only from the payment provider's published test numbers. Never
+   generate random Luhn-valid card numbers: they can be real cards.
+7. **Insert in batches** with `createMany`, multi-row `INSERT`, or `COPY` for
+   large volumes. Keep rows times columns per statement under the driver's
+   bind-parameter limit (PostgreSQL allows at most 65,535 parameters per
+   statement); for example 1,000 to 5,000 rows per batch.
+8. **Verify, then report.** Check row counts per table, run an orphan check per
+   foreign key, and check uniqueness and the intended skew. Orphan checks matter
+   most where the database does not enforce foreign keys (for example Prisma
+   `relationMode = "prisma"`, MongoDB, or constraints dropped for load speed).
+9. **Make reruns safe.** Prefer seeding a fresh database created for this run.
+   Resetting an existing one destroys its data: do it only with approval and a
+   confirmed disposable target.
 
-- **Production Dump Rejection**: If prompt suggests pulling or dumping live production databases, **ABORT execution immediately** and refuse with `PRODUCTION_DUMP_FORBIDDEN`.
-- **`target_engine`**: Auto-detected from `package.json` (`@prisma/client` $\rightarrow$ `prisma`, `drizzle-orm` $\rightarrow$ `drizzle`, `pg` $\rightarrow$ `postgresql`).
-- **`seed_library`**: Auto-detected from installed dependencies (defaults to `@faker-js/faker`).
-- **`deterministic_seed`**: Defaults to `42` to ensure 100% reproducible test data generation across developer machines and CI.
+## Reference example: Prisma seed script
 
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Schema Discovery & Topological DAG Ordering
-
-1. Read database schemas (`prisma/schema.prisma`, `schema.ts`, `.sql` DDLs).
-2. Construct the Directed Acyclic Graph (DAG) for foreign key dependencies:
-   - **Level 0 (Roots)**: Tables with zero foreign keys (e.g. `Tenants`, `Users`).
-   - **Level 1 (Children)**: Tables dependent on Level 0 (e.g. `Accounts`, `Products`).
-   - **Level 2 (Transactions)**: Tables dependent on Level 1 (e.g. `Orders`).
-   - **Level 3 (Junctions / Logs)**: Line items and audit events (e.g. `OrderItems`, `AuditLogs`).
-
-### Step 2: Seed Engine & CSPRNG Initialization
-
-1. Initialize fake data generator with explicit deterministic seed:
-   ```typescript
-   import { faker } from '@faker-js/faker';
-   faker.seed(42); // Enforce reproducible synthetic outputs
-   ```
-
-### Step 3: Multi-Table Batch Generator Implementation
-
-1. **Parent Key Pool Caching**: Generate Level 0 root entities first, retaining created Primary Key IDs in memory arrays (`userKeyPool = ['usr-1', 'usr-2', ...]`).
-2. **Chunked Batch Insertion**: Insert child records in memory-optimized batches ($1,000 - 5,000$ records per transaction) using `createMany()`, `bulkInsert()`, or `COPY`:
-   - Never use single-row `INSERT` queries inside unbatched loops.
-3. **Statistical Skew Application**: Apply Zipfian power-law distributions to parent ID selection so a small subset of parent records own a large share of child records, matching real-world workloads.
-
-### Step 4: RFC & PII Privacy Compliance Audit
-
-1. **Email Masking**: Append reserved RFC 2606 domain extensions (`@example-synthetic.test`).
-2. **IP Address Masking**: Use RFC 5737 documentation networks (`198.51.100.0/24`).
-3. **Phone & Card Masking**: Use reserved telco prefixes (`555-0100` to `555-0199`) and Luhn-valid test card numbers.
-
-### Step 5: Database Seeding & Referential Integrity Verification
-
-1. Execute seed script against target test database.
-2. Run SQL orphan check query to verify zero unlinked foreign keys exist:
-   ```sql
-   SELECT COUNT(*) FROM orders LEFT JOIN users ON orders.user_id = users.id WHERE users.id IS NULL;
-   ```
-
----
-
-## 3. Reference Implementation: Deterministic TypeScript / Prisma Generator
+Illustrative TypeScript against the `@faker-js/faker` v8+ API and a Prisma
+schema with `User` and `Order` models. Run it through the project's seed
+command (for example `npx prisma db seed`).
 
 ```typescript
 import { PrismaClient } from '@prisma/client';
 import { faker } from '@faker-js/faker';
 
 const prisma = new PrismaClient();
-const SEED_NUM = 42;
-const BATCH_SIZE = 2500;
+const SEED = 42;
+const REF_DATE = new Date('2026-01-01T00:00:00.000Z');
+const BATCH_SIZE = 2000;
+const USER_COUNT = 5000;
+const ORDER_COUNT = 25000;
 
-// Zipfian distribution simulator for realistic heavy-tail purchase skew
-function getZipfianParentId(parentPool: string[], skew = 1.2): string {
-  const rank = Math.floor(Math.pow(faker.number.float({ min: 0.001, max: 1.0 }), -1 / skew));
-  const index = (rank - 1) % parentPool.length;
-  return parentPool[index];
+faker.seed(SEED);
+faker.setDefaultRefDate(REF_DATE); // date.past() and friends are relative to this, not now
+
+// Rank k (1-based) is drawn with probability proportional to 1 / k^s. Build the
+// cumulative weights once, then binary-search a seeded uniform draw.
+function makeZipfSampler<T>(items: T[], s = 1.2): () => T {
+  if (items.length === 0) throw new Error('cannot sample from an empty pool');
+  const cdf: number[] = [];
+  let total = 0;
+  for (let k = 1; k <= items.length; k++) {
+    total += 1 / Math.pow(k, s);
+    cdf.push(total);
+  }
+  return () => {
+    const target = faker.number.float({ min: 0, max: 1 }) * total;
+    let lo = 0;
+    let hi = items.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cdf[mid] > target) hi = mid;
+      else lo = mid + 1;
+    }
+    return items[lo];
+  };
 }
 
-export async function seedDatabase(userCount = 5000, orderCount = 25000) {
-  // Set deterministic seed for reproducible execution
-  faker.seed(SEED_NUM);
-  console.log(`[Seed] Starting synthetic generation (Users: ${userCount}, Orders: ${orderCount})...`);
+interface SeededUser { id: string; createdAt: Date }
 
-  // --- Step 1: Generate Level 0 Root Entities (Users) ---
-  const userKeyPool: string[] = [];
-  const userBatches = Math.ceil(userCount / BATCH_SIZE);
-
-  for (let i = 0; i < userBatches; i++) {
-    const currentBatchSize = Math.min(BATCH_SIZE, userCount - i * BATCH_SIZE);
-    const userData = Array.from({ length: currentBatchSize }, () => {
-      const id = faker.string.uuid();
-      userKeyPool.push(id);
+async function seedUsers(): Promise<SeededUser[]> {
+  const users: SeededUser[] = [];
+  for (let start = 0; start < USER_COUNT; start += BATCH_SIZE) {
+    const size = Math.min(BATCH_SIZE, USER_COUNT - start);
+    const data = Array.from({ length: size }, (_, j) => {
+      const user = { id: faker.string.uuid(), createdAt: faker.date.past({ years: 2 }) };
+      users.push(user);
       return {
-        id,
-        email: `user_${faker.string.alphanumeric(8)}@example-synthetic.test`, // RFC 2606
+        ...user,
+        email: `user${start + j}@example.test`, // unique by index; RFC 2606 reserved TLD
         fullName: faker.person.fullName(),
-        createdAt: faker.date.past({ years: 2 }),
       };
     });
-
-    await prisma.user.createMany({ data: userData });
+    await prisma.user.createMany({ data });
   }
-
-  // --- Step 2: Generate Level 1 Dependent Entities (Orders) ---
-  const orderBatches = Math.ceil(orderCount / BATCH_SIZE);
-
-  for (let i = 0; i < orderBatches; i++) {
-    const currentBatchSize = Math.min(BATCH_SIZE, orderCount - i * BATCH_SIZE);
-    const orderData = Array.from({ length: currentBatchSize }, () => ({
-      id: faker.string.uuid(),
-      userId: getZipfianParentId(userKeyPool), // Skewed foreign key link
-      amount: parseFloat(faker.finance.amount({ min: 5, max: 500, dec: 2 })),
-      status: faker.helpers.arrayElement(['COMPLETED', 'COMPLETED', 'COMPLETED', 'PENDING', 'CANCELLED']),
-      createdAt: faker.date.recent({ days: 180 }),
-    }));
-
-    await prisma.order.createMany({ data: orderData });
-  }
-
-  console.log('[Seed] Seeding completed successfully. 100% referential integrity verified.');
+  return users;
 }
 
-if (require.main === module) {
-  seedDatabase()
-    .catch((err) => {
-      console.error('[Seed Error] Synthetic generation failed:', err);
-      process.exit(1);
-    })
-    .finally(async () => {
-      await prisma.$disconnect();
+async function seedOrders(users: SeededUser[]): Promise<void> {
+  // Shuffle first so the heavy users are not simply the earliest created.
+  const pickUser = makeZipfSampler(faker.helpers.shuffle(users));
+  for (let start = 0; start < ORDER_COUNT; start += BATCH_SIZE) {
+    const size = Math.min(BATCH_SIZE, ORDER_COUNT - start);
+    const data = Array.from({ length: size }, () => {
+      const user = pickUser();
+      return {
+        id: faker.string.uuid(),
+        userId: user.id,
+        amountCents: faker.number.int({ min: 500, max: 50_000 }),
+        status: faker.helpers.weightedArrayElement([
+          { weight: 7, value: 'COMPLETED' },
+          { weight: 2, value: 'PENDING' },
+          { weight: 1, value: 'CANCELLED' },
+        ]),
+        createdAt: faker.date.between({ from: user.createdAt, to: REF_DATE }), // never before its user
+      };
     });
+    await prisma.order.createMany({ data });
+  }
 }
+
+// Claim integrity only after checking it. Table and column names depend on the
+// Prisma schema's mapping.
+async function verify(): Promise<void> {
+  const users = await prisma.user.count();
+  const orders = await prisma.order.count();
+  if (users !== USER_COUNT || orders !== ORDER_COUNT) {
+    throw new Error(`row counts: users ${users}/${USER_COUNT}, orders ${orders}/${ORDER_COUNT}`);
+  }
+  const [{ orphans }] = await prisma.$queryRaw<{ orphans: bigint }[]>`
+    SELECT count(*) AS orphans
+    FROM "Order" o LEFT JOIN "User" u ON u.id = o."userId"
+    WHERE u.id IS NULL`;
+  if (Number(orphans) !== 0) throw new Error(`${orphans} orders reference missing users`);
+}
+
+async function main(): Promise<void> {
+  const users = await seedUsers();
+  await seedOrders(users);
+  await verify();
+  console.log(`Seeded ${USER_COUNT} users and ${ORDER_COUNT} orders; row counts and orphan check passed.`);
+}
+
+main()
+  .catch((err) => {
+    console.error('Seed failed:', err);
+    process.exitCode = 1;
+  })
+  .finally(() => prisma.$disconnect());
 ```
 
----
-
-## 4. Topological & Performance Invariants
-
-$$\text{Referential Integrity: } \forall c \in \text{ChildTable}, \quad c.parent\_id \in \{ \text{ParentKeyPool} \}$$
-
-$$\text{Batch Seeding Throughput: } \text{Rate} = \frac{\text{Total Rows Inserted}}{\Delta t_{\text{sec}}} \ge 5000 \text{ rows/sec}$$
-
-$$\text{Zero-PII Leak Invariant: } \text{Count}(\text{RealUserEmails}) = 0 \quad (\text{100\% Synthetic / RFC 2606})$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **No Unbatched Inserts**: Never execute single-row `INSERT` statements inside unbatched loops. Always use chunked batch transactions (`createMany`, `bulkInsert`).
-- **Topological Order**: Always populate parent entities before child entities; never attempt to insert child records with uncommitted parent IDs.
-- **Deterministic Pseudorandom Seeds**: Always initialize random number generators with a deterministic seed (`faker.seed(42)`).
-
-### Security & Privacy Invariants
-
-- **No Real PII**: Never import or reference real production database dumps or personal user records.
-- **RFC Reserved Domains**: All synthetic email addresses must use RFC 2606 reserved TLDs (`@example-synthetic.test`, `@example.com`).
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-Before running seed operations, record baseline state. If seeding fails or encounters unique constraint violations:
+The row-count check assumes the tables were empty before seeding. If a rerun
+needs a clean slate, resetting with Prisma drops all data in the target
+database, so it runs only after the user approves and the target is confirmed
+disposable:
 
 ```bash
-# Clean up target test database tables
-npx prisma migrate reset --force 2>/dev/null
-
-# Revert modified files
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
+npx prisma migrate reset --force  # requires approval: deletes all data in the target database
 ```
 
----
+## Guardrails
 
-## 7. Verification Plan & Toolchain Commands
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions,
+  including any reset, truncate, or drop of an existing database.
+- Never weaken a test, check, or threshold to make work pass.
+- Never dump, copy, or sample production data into this workflow. Real
+  personal data in development or CI widens who can see it, usually exceeds
+  the purpose it was collected for, and lands on machines with weaker
+  controls. Say so plainly and offer alternatives: a schema-only dump (for
+  example `pg_dump --schema-only`), synthetic data shaped by aggregate
+  statistics the data owner approves (row counts, null rates, value
+  distributions), or an anonymization pipeline that the data owner has approved
+  and runs.
+- Never print or log connection strings or credentials.
+- Do not claim integrity, determinism, or distribution fit without the check
+  that shows it.
 
-Execute seed script and verify referential integrity:
+## Verification
 
-```bash
-# 1. Run synthetic seed script
-npx ts-node prisma/seed.ts
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
 
-# 2. Run SQL orphan check query via CLI
-psql -d test_db -c "SELECT COUNT(*) FROM orders LEFT JOIN users ON orders.user_id = users.id WHERE users.id IS NULL;"
-```
+- The seed command exits zero on a fresh disposable database, and its own
+  row-count and orphan checks pass.
+- Determinism: two runs into two fresh databases produce identical content, for
+  example the same result from
+  `SELECT md5(string_agg(id || ':' || email || ':' || "createdAt", ',' ORDER BY id)) FROM "User";`
+- Skew: a group-by on the child foreign key shows the intended heavy tail (a
+  few parents own a large share of children).
+- No real-looking personal data: emails, IPs, and phone numbers fall inside the
+  reserved ranges.
+- The project's type check and tests pass with the seeded data.
 
----
+## Report
 
-## 8. Completion Report
+- **Target:** database and how it was confirmed disposable.
+- **Order:** tables in dependency order, and how cycles were handled.
+- **Volumes and distributions:** rows per table, skew parameters, null rates.
+- **Determinism:** seed, reference date, pinned faker version, and the
+  repeat-run comparison result.
+- **Integrity:** row counts, orphan checks, and uniqueness results.
+- **Not verified:** checks that could not run and why.
 
-Report target database engine, topological levels processed, total rows generated per table, batch insertion throughput (rows/sec), PII masking verification results, and referential integrity test outputs.
+## Optional delegation
+
+The `synthetic-data-architect` subagent can review the schema for dependency
+order, constraints, and realistic distributions before you write the
+generator; verify its findings against the schema. One agent can complete this
+workflow alone.

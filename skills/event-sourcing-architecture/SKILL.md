@@ -1,276 +1,356 @@
 ---
 name: event-sourcing-architecture
-description: Design immutable event logs, CQRS command/query models, and materialized view projections.
+description: "Design event-sourced systems and CQRS read models: aggregates and events, an append-only store with optimistic concurrency, outbox publishing to idempotent consumers, projections with persisted checkpoints, snapshots, event versioning and upcasting, and erasure of personal data. Use when a domain needs the full history of state changes, temporal queries, or several read models built from one write model. Not for ordinary CRUD or simple audit trails (use the database-design skill)."
 ---
 
 # Event Sourcing Architecture
 
-Design append-only immutable event stores, Command Query Responsibility Segregation (CQRS) architectures, materialized view projection engines, aggregate root state hydration, outbox pattern transaction publishers, and deterministic event replay pipelines.
+Design systems whose state is derived by folding an append-only log of domain
+events, with read models built as projections of that log. The stance is
+**question the fit first, then make every reader replay-safe**: projections,
+relays, and consumers must tolerate duplicates, retries, and rebuilds without
+losing or double-applying an event.
 
-The skill is **append-only and replay-verified**: event schemas, versioning semantics, optimistic concurrency checks (`expected_version`), snapshot intervals, projection idempotency, and deterministic state re-hydration ($\text{State} = \text{Fold}(Init, \text{Events}_{1..n})$) are verified before implementation.
+## When to use
 
----
+- The business needs the history of how state changed, not only the current
+  state: ledgers, order or claim lifecycles, regulated workflows.
+- Temporal questions ("what did we know at time T") or replaying history into
+  new read models.
+- Several differently shaped read models from one write model (CQRS), or
+  integration events for other services.
 
-## 1. Required I/O Context Schemas & Natural Language Auto-Inference
+## When not to use
 
-The skill supports **two invocation modes**:
+- Most CRUD applications. Event sourcing adds event versioning, projection lag,
+  rebuilds, and harder erasure. If the need is an audit trail, an audit table or
+  change data capture on a normal schema is usually enough: use the
+  `database-design` skill.
+- Analytics over events: use the `data-pipeline-design` skill.
+- Moving an existing table-backed system onto events: plan the move with the
+  `safe-migration` skill.
+- Independent review of the store schema and access paths: delegate to the
+  `database-architect` subagent.
 
-1. **🤖 Orchestrator / Technical Mode (JSON Manifest)**: Pass the JSON context manifest below.
-2. **💬 Non-Technical Mode (Plain English Prompts)**: If the user provides a natural language prompt (e.g. *"Design an event-sourced order management system with PostgreSQL append-only event store, snapshotting, and materialized view projections"*), the agent **must automatically infer and populate** `aggregate_name`, `event_types`, `persistence_engine`, `projection_strategy`, and `snapshot_frequency` from the user's text.
+## Inputs to gather
 
-### JSON Context Manifest Schema
+Discover these before asking. Ask only about what remains ambiguous.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "EventSourcingContextManifest",
-  "type": "object",
-  "required": ["aggregate_spec", "event_store_context"],
-  "properties": {
-    "aggregate_spec": {
-      "type": "object",
-      "required": ["aggregate_name", "event_types"],
-      "properties": {
-        "aggregate_name": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
-        "event_types": { 
-          "type": "array", 
-          "items": { "type": "string" },
-          "minItems": 1 
-        },
-        "snapshot_frequency": { "type": "integer", "default": 100 }
-      }
-    },
-    "event_store_context": {
-      "type": "object",
-      "required": ["persistence_engine", "concurrency_mode"],
-      "properties": {
-        "persistence_engine": { 
-          "type": "string", 
-          "enum": ["postgresql", "eventstore_db", "dynamodb", "kafka", "sqlite"] 
-        },
-        "concurrency_mode": { 
-          "type": "string", 
-          "enum": ["optimistic_version", "pessimistic_lock", "sequence_number"] 
-        },
-        "outbox_pattern_enabled": { "type": "boolean", "default": true }
-      }
-    },
-    "projection_context": {
-      "type": "object",
-      "properties": {
-        "projection_strategy": { 
-          "type": "string", 
-          "enum": ["inline_synchronous", "async_outbox_worker", "event_bus_listener"] 
-        },
-        "read_model_db": { "type": "string", "default": "postgresql_views" }
-      }
-    }
-  }
-}
+- The requirement that needs history or replay. If nobody can name one, say so
+  and recommend a conventional schema.
+- Domain: aggregates (consistency boundaries), commands, the invariants each
+  command enforces, and expected events per aggregate.
+- Store and broker: a PostgreSQL table, EventStoreDB, DynamoDB, Kafka, or other,
+  and whether the store provides a commit-ordered global position.
+- Read models, their consumers, and acceptable projection lag.
+- Personal data that events would carry, and the retention and erasure duties.
+- The project's test runner and commands.
+
+## Workflow
+
+1. **Decide whether it fits.** Write down the requirement that needs history.
+   If there is none, stop and recommend a conventional design.
+2. **Model aggregates and events.** One aggregate is one consistency boundary
+   and one stream. Events are past-tense business facts (`OrderPaid`, not
+   `SetStatus`) that carry only what happened. Command handlers enforce
+   invariants before appending. The fold (`evolve`) never rejects a stored
+   event, and it handles every event type the stream can contain.
+3. **Define the envelope:** `eventId` (unique, for deduplication), `streamId`,
+   `streamVersion` (1..n within the stream), a store-wide position, `type`,
+   `schemaVersion`, `occurredAt`, `data`, and metadata (correlation id,
+   causation id, actor).
+4. **Append with optimistic concurrency.** The handler loads the stream at
+   version N and appends N+1 onward. A unique `(stream_id, stream_version)`
+   constraint rejects a concurrent writer; reload and re-run the command, or
+   return a conflict. Never overwrite.
+5. **Publish through an outbox.** Write events and outbox rows in one
+   transaction, or treat the events table itself as the outbox. A relay
+   publishes in order and records its progress. It can crash after publishing
+   and before recording, so delivery is at-least-once: every consumer
+   deduplicates by `eventId`, recording processed ids in the same transaction
+   as its side effect.
+6. **Build projections with persisted checkpoints.** A projection stores its
+   checkpoint in the same transaction as its read-model write: either the last
+   applied `streamVersion` per stream, or one global position (see the caveat
+   below). A duplicate is skipped; a gap is an error to retry, never a skip.
+   Deliver one stream's events to one worker at a time (partition by stream id).
+7. **Plan rebuilds.** A projection is disposable. Build a new version from the
+   start of the log beside the old one, switch reads once it catches up, then
+   retire the old one (dropping tables in shared environments needs approval).
+8. **Version events** and **snapshot only when needed** (sections below).
+9. **Handle personal data and corrections** (sections below) before the first
+   event is stored; both are expensive to retrofit.
+
+## Global position caveat
+
+A checkpoint on a global position only works if positions become visible in
+order. A PostgreSQL identity or sequence value is assigned at insert, not at
+commit, so a reader can see position 11 before 10 commits, advance past 10,
+and never apply it. Choose one:
+
+- Per-stream checkpoints, as in the example below.
+- Serialize appends (for example a transaction-level advisory lock) and accept
+  the throughput limit.
+- Store the writing transaction id with each event (`pg_current_xact_id()`,
+  PostgreSQL 13+) and read only events whose transaction id is below
+  `pg_snapshot_xmin(pg_current_snapshot())`, so no in-flight transaction can
+  still commit a lower position.
+- A purpose-built store whose position is commit-ordered; confirm this in its
+  documentation.
+
+## Reference example
+
+Illustrative PostgreSQL store:
+
+```sql
+CREATE TABLE events (
+    global_position bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    stream_id       text        NOT NULL,
+    stream_version  integer     NOT NULL CHECK (stream_version > 0),
+    event_id        uuid        NOT NULL UNIQUE,
+    event_type      text        NOT NULL,
+    schema_version  integer     NOT NULL,
+    data            jsonb       NOT NULL,
+    metadata        jsonb       NOT NULL DEFAULT '{}',
+    occurred_at     timestamptz NOT NULL DEFAULT now(),
+    -- Optimistic concurrency: two writers cannot both append version N.
+    UNIQUE (stream_id, stream_version)
+);
+
+-- Append-only by privilege, not convention. The application role must not
+-- own the table.
+REVOKE UPDATE, DELETE, TRUNCATE ON events FROM app_writer;
+GRANT SELECT, INSERT ON events TO app_writer;
+
+CREATE TABLE projection_checkpoints (
+    projection   text    NOT NULL,
+    stream_id    text    NOT NULL,
+    last_version integer NOT NULL,
+    PRIMARY KEY (projection, stream_id)
+);
 ```
 
-### Automatic Natural Language Inference & Mutation Rejection
-
-If no raw JSON payload is provided, apply these defaults and strict safety checks:
-
-- **Event Mutation Rejection**: If prompt attempts to execute `UPDATE` or `DELETE` on historical event records, **ABORT execution immediately** and reject with `MUTATION_OF_IMMUTABLE_LOG_FORBIDDEN`.
-- **`aggregate_name`**: Extracted from prompt noun (e.g. "orders" $\rightarrow$ `OrderAggregate`).
-- **`event_types`**: Inferred from lifecycle transitions (e.g. `OrderCreated`, `OrderPaid`, `OrderShipped`, `OrderCancelled`).
-- **`persistence_engine`**: Defaults to PostgreSQL with append-only event tables (`event_store`).
-
----
-
-## 2. Deterministic State Machine Execution Flow
-
-Follow this exact sequential protocol. Do not skip steps or alter execution ordering.
-
-### Step 1: Domain Event & Aggregate Root Schema Specification
-
-1. Define immutable event schemas (`v1.0.0`) with explicit metadata:
-   ```json
-   {
-     "eventId": "evt-uuid-12345",
-     "aggregateId": "ord-7890",
-     "aggregateType": "OrderAggregate",
-     "eventType": "OrderCreated",
-     "eventVersion": 1,
-     "sequenceNumber": 1,
-     "timestamp": "2026-08-23T18:34:00Z",
-     "payload": { "totalAmount": 150.00, "customerId": "cust-42" },
-     "metadata": { "correlationId": "req-99", "actorId": "usr-1" }
-   }
-   ```
-2. Design Aggregate Root reducer function (`applyEvent(state, event)`) that updates state purely in-memory without side-effects.
-
-### Step 2: Append-Only Event Store & Optimistic Concurrency
-
-1. Implement append-only event insertion with Optimistic Concurrency Control (OCC):
-   - Check if `current_version == expected_version` before appending.
-   - Raise `CONCURRENCY_VERSION_MISMATCH` if a race condition occurs.
-2. Implement **Transactional Outbox Pattern**: Insert events into both `event_store` and `outbox` in the same DB transaction to guarantee atomic publishing to message brokers (Kafka / RabbitMQ).
-
-### Step 3: Materialized View Projection Engine
-
-1. Construct read-optimized materialized view tables for query operations (CQRS Read Model).
-2. Implement idempotent projection handlers (`onEvent(event)`):
-   - Handle out-of-order delivery using `sequenceNumber` tracking.
-   - Ignore already-applied events (`if (event.sequenceNumber <= view.lastProcessedSequence) return;`).
-
-### Step 4: Snapshotting & State Re-Hydration Protocol
-
-1. Store aggregate state snapshots every $N$ events (e.g. every 100 events).
-2. Re-hydrate Aggregate Root state efficiently:
-   - Load latest snapshot if available ($State_{\text{snap}}$).
-   - Fetch and replay events generated after the snapshot version ($Version > Version_{\text{snap}}$).
-   - Fold state: $State_{\text{current}} = \text{Fold}(State_{\text{snap}}, \text{Events}_{\text{remaining}})$.
-
----
-
-## 3. Reference Implementation: TypeScript Event Store & Projection Engine
+Illustrative TypeScript domain model, a pure fold, and a command handler:
 
 ```typescript
-import { z } from 'zod';
+export type OrderEvent =
+  | { type: 'OrderCreated'; data: { customerId: string; totalCents: number } }
+  | { type: 'OrderPaid'; data: { paymentId: string } }
+  | { type: 'OrderShipped'; data: { trackingNumber: string } }
+  | { type: 'OrderCancelled'; data: { reason: string } };
 
-// 1. Immutable Domain Event Schema
-export const DomainEventSchema = z.object({
-  eventId: z.string().uuid(),
-  aggregateId: z.string(),
-  aggregateType: z.string(),
-  eventType: z.string(),
-  eventVersion: z.number().int().positive(),
-  sequenceNumber: z.number().int().positive(),
-  timestamp: z.string().datetime(),
-  payload: z.record(z.unknown()),
-  metadata: z.record(z.unknown()),
-});
-
-export type DomainEvent = z.infer<typeof DomainEventSchema>;
-
-// 2. Aggregate Root (OrderAggregate State & Reducer)
-export interface OrderState {
-  orderId: string;
-  customerId: string;
-  status: 'NONE' | 'CREATED' | 'PAID' | 'SHIPPED' | 'CANCELLED';
-  totalAmount: number;
-  version: number;
+export interface Envelope {
+  eventId: string;
+  streamId: string;
+  streamVersion: number;
+  schemaVersion: number;
+  occurredAt: string;
 }
 
-export class OrderAggregate {
-  private state: OrderState = {
-    orderId: '',
-    customerId: '',
-    status: 'NONE',
-    totalAmount: 0,
-    version: 0,
-  };
+export type StoredOrderEvent = Envelope & OrderEvent;
 
-  // Pure State Reducer: State = Fold(Init, Events)
-  public apply(event: DomainEvent): void {
-    switch (event.eventType) {
+export interface OrderState {
+  status: 'NONE' | 'CREATED' | 'PAID' | 'SHIPPED' | 'CANCELLED';
+  customerId?: string;
+  totalCents: number;
+  version: number; // streamVersion of the last applied event
+}
+
+export const initialOrder: OrderState = { status: 'NONE', totalCents: 0, version: 0 };
+
+// Pure: no I/O, no clock, never rejects a stored event.
+export function evolve(state: OrderState, e: StoredOrderEvent): OrderState {
+  const version = e.streamVersion;
+  switch (e.type) {
+    case 'OrderCreated':
+      return { status: 'CREATED', customerId: e.data.customerId, totalCents: e.data.totalCents, version };
+    case 'OrderPaid':
+      return { ...state, status: 'PAID', version };
+    case 'OrderShipped':
+      return { ...state, status: 'SHIPPED', version };
+    case 'OrderCancelled':
+      return { ...state, status: 'CANCELLED', version };
+    default: {
+      const unhandled: never = e; // compile error if an event type is missing
+      throw new Error(`unhandled event: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+export const rehydrate = (events: StoredOrderEvent[], from: OrderState = initialOrder): OrderState =>
+  events.reduce(evolve, from);
+
+// Invariants live in command handlers, before anything is appended.
+export function decideShip(state: OrderState, trackingNumber: string): OrderEvent[] {
+  if (state.status !== 'PAID') {
+    throw new Error(`cannot ship an order in status ${state.status}`);
+  }
+  return [{ type: 'OrderShipped', data: { trackingNumber } }];
+}
+```
+
+Idempotent projection. The checkpoint is per stream and commits with the
+read-model write, so a crash between them can neither skip an event nor apply
+it twice, and events from different orders never shadow each other:
+
+```typescript
+// Adapt this minimal interface to the project's database client.
+export interface Tx {
+  query<R>(sql: string, params: unknown[]): Promise<{ rows: R[] }>;
+}
+export interface Db {
+  transaction<T>(work: (tx: Tx) => Promise<T>): Promise<T>;
+}
+
+const PROJECTION = 'order_view';
+const STATUS = { OrderPaid: 'PAID', OrderShipped: 'SHIPPED', OrderCancelled: 'CANCELLED' } as const;
+
+export async function projectOrderEvent(db: Db, e: StoredOrderEvent): Promise<void> {
+  await db.transaction(async (tx) => {
+    const { rows } = await tx.query<{ last_version: number }>(
+      `SELECT last_version FROM projection_checkpoints
+        WHERE projection = $1 AND stream_id = $2
+        FOR UPDATE`,
+      [PROJECTION, e.streamId],
+    );
+    const last = rows[0]?.last_version ?? 0;
+    if (e.streamVersion <= last) return; // duplicate delivery or replay
+    if (e.streamVersion !== last + 1) {
+      // An earlier event has not arrived yet: fail so delivery is retried.
+      throw new Error(`gap in ${e.streamId}: expected ${last + 1}, got ${e.streamVersion}`);
+    }
+
+    switch (e.type) {
       case 'OrderCreated':
-        this.state.orderId = event.aggregateId;
-        this.state.customerId = event.payload.customerId as string;
-        this.state.totalAmount = event.payload.totalAmount as number;
-        this.state.status = 'CREATED';
+        await tx.query(
+          `INSERT INTO order_view (order_id, customer_id, total_cents, status)
+           VALUES ($1, $2, $3, 'CREATED')`,
+          [e.streamId, e.data.customerId, e.data.totalCents],
+        );
         break;
       case 'OrderPaid':
-        this.state.status = 'PAID';
-        break;
+      case 'OrderShipped':
       case 'OrderCancelled':
-        this.state.status = 'CANCELLED';
+        await tx.query(`UPDATE order_view SET status = $2 WHERE order_id = $1`, [e.streamId, STATUS[e.type]]);
         break;
     }
-    this.state.version = event.sequenceNumber;
-  }
 
-  public getState(): Readonly<OrderState> {
-    return this.state;
-  }
-}
-
-// 3. Materialized View Projection Engine
-export class OrderReadModelProjection {
-  private lastProcessedSequence = 0;
-
-  public async handle(event: DomainEvent, dbClient: any): Promise<void> {
-    // Idempotency Check: Ignore already applied sequence numbers
-    if (event.sequenceNumber <= this.lastProcessedSequence) {
-      return;
-    }
-
-    if (event.eventType === 'OrderCreated') {
-      await dbClient.query(
-        `INSERT INTO view_orders (order_id, customer_id, total_amount, status, last_seq)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (order_id) DO NOTHING`,
-        [event.aggregateId, event.payload.customerId, event.payload.totalAmount, 'CREATED', event.sequenceNumber]
-      );
-    } else if (event.eventType === 'OrderPaid') {
-      await dbClient.query(
-        `UPDATE view_orders SET status = 'PAID', last_seq = $1 WHERE order_id = $2 AND last_seq < $1`,
-        [event.sequenceNumber, event.aggregateId]
-      );
-    }
-
-    this.lastProcessedSequence = event.sequenceNumber;
-  }
+    await tx.query(
+      `INSERT INTO projection_checkpoints (projection, stream_id, last_version)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (projection, stream_id) DO UPDATE SET last_version = EXCLUDED.last_version`,
+      [PROJECTION, e.streamId, e.streamVersion],
+    );
+  });
 }
 ```
 
----
+If two deliveries of a stream's first event race, the primary key on
+`order_view` rejects one; its retry then sees the checkpoint and skips.
 
-## 4. Mathematical Invariants & Replay Theorem
+## Event versioning and upcasting
 
-$$\text{Replay Equivalence Theorem: } \text{State}_{\text{current}} \equiv \text{Fold}(Init, \text{Events}_{1..n})$$
+- Never change the meaning of a stored event. A new optional field is an
+  additive change: bump `schemaVersion` and default the field when reading.
+- For renames, unit changes, or splits, write an upcaster that converts old
+  payloads to the current shape on read. Chain them (v1 to v2 to v3), keep them
+  pure, and test each against stored fixtures of the old version.
+- A change in business meaning is a new event type, not a new version.
+- Do not rewrite the log in place. If the log itself must be transformed, copy
+  it to a new store and switch over with the `safe-migration` skill.
 
-$$\text{Optimistic Concurrency: } \text{Append}(E, V_{\text{expected}}) \implies \begin{cases} \text{SUCCESS}, & \text{if } V_{\text{current}} = V_{\text{expected}} \\ \mathbf{CONCURRENCY\_FAIL}, & \text{if } V_{\text{current}} \neq V_{\text{expected}} \end{cases}$$
+```typescript
+// Illustrative: v1 OrderCreated stored `customer`; v2 renamed it to `customerId`.
+interface RawEvent { type: string; schemaVersion: number; data: Record<string, unknown> }
 
-$$\text{Projection Idempotency: } \text{Project}(\text{Event}_k) \circ \text{Project}(\text{Event}_k) = \text{Project}(\text{Event}_k)$$
-
----
-
-## 5. Guardrails
-
-### Operational Restrictions
-
-- **Never Update or Delete Events**: Event log is strictly append-only (`INSERT` allowed; `UPDATE` / `DELETE` strictly forbidden).
-- **Optimistic Concurrency Mandatory**: Every event append must supply `expected_version` to prevent lost updates under race conditions.
-- **Idempotent Projections**: Materialized view projection handlers must track sequence numbers to ignore duplicate event deliveries safely.
-
-### Architecture Invariants
-
-- **Transactional Outbox**: Always write domain events and outbox messages within the same database transaction block.
-- **Side-Effect Free Reducers**: Aggregate state reducers (`apply`) must be pure functions with zero network/disk side-effects.
-
----
-
-## 6. Atomic Failure Recovery & Rollback Handler
-
-Before running migration scripts, capture baseline state. If projection or event store tests fail:
-
-```bash
-# Revert read model projections or event store schema migrations
-if [ -n "${MODIFIED_FILES:-}" ]; then
-  git checkout -- ${MODIFIED_FILES} 2>/dev/null
-fi
+export function upcast(e: RawEvent): RawEvent {
+  if (e.type === 'OrderCreated' && e.schemaVersion === 1) {
+    const { customer, ...rest } = e.data;
+    return { ...e, schemaVersion: 2, data: { ...rest, customerId: customer } };
+  }
+  return e;
+}
 ```
 
----
+## Snapshots
 
-## 7. Verification Plan & Toolchain Commands
+- A snapshot is a cache: `(stream_id, stream_version, snapshot_schema_version,
+  state)`. Load the latest one and replay only the events after its version.
+- Version snapshots separately from events. When the state shape or the fold
+  logic changes, bump the snapshot schema version and ignore older snapshots
+  (replay from events) until new ones are written. Snapshots can be deleted and
+  rebuilt at any time.
+- Add them only when measured replay time is a problem. Very long streams often
+  mean the aggregate boundary is too wide.
 
-Execute event sourcing replay and projection unit tests:
+## Personal data and erasure
 
-```bash
-# 1. Run event replay and aggregate reducer unit tests
-npm test
+Events are immutable, so a person's data cannot be removed from them with
+`UPDATE` or `DELETE`. Decide before storing any:
 
-# 2. Verify projection idempotency with duplicate event stream test
-npx jest tests/event-sourcing/projection.test.ts
-```
+- **Keep personal data out of events.** Store it in a separate mutable store
+  keyed by subject id; events carry only the id.
+- **Crypto-shredding.** Encrypt personal fields with a per-subject key held in
+  a key store (KMS or vault). Erasure deletes the key, leaving the ciphertext
+  unreadable. Projections must handle a missing key by rendering the value as
+  redacted. Read models, caches, and search indexes that hold plaintext must be
+  erased separately, and key-store backups need a retention that honors erasure.
 
----
+Confirm with the project's privacy or legal owner that the chosen approach
+meets its erasure obligations.
 
-## 8. Completion Report
+## Corrections without mutation
 
-Report aggregate roots designed, event schemas created (`v1.0.0`), event store persistence engine, concurrency strategy, projection strategy, snapshot frequency, and deterministic event replay verification results.
+If a request asks to `UPDATE` or `DELETE` stored events, explain why not:
+projections, consumers, and audits rely on the log as the source of truth, and
+silently rewritten history breaks replay. Propose a compensating event instead
+(`OrderCancelled`, `PaymentRefunded`, or an explicit correction such as
+`OrderAmountCorrected`) that projections apply like any other event.
+
+## Guardrails
+
+- Revert or delete only files you created or changed in this session, and say
+  so. Never discard someone else's uncommitted work.
+- Ask before destructive, irreversible, outward-facing, or production actions,
+  including projection rebuilds or replays against shared environments.
+- Never weaken a test, check, or threshold to make work pass.
+- Never update or delete stored events; corrections are new events.
+- Every append carries an expected version; every consumer deduplicates by
+  `eventId`; every checkpoint commits with its read-model write.
+- Folds and upcasters are pure: no network, disk, clock, or randomness.
+
+## Verification
+
+Use the project's own commands from `AGENTS.md`, `CLAUDE.md`, package scripts,
+or the `Makefile`. Run each check separately and report its real result; never
+chain alternatives with `||`.
+
+- Command handlers: given past events, a command yields the expected new events
+  or the expected rejection (for example shipping an unpaid order fails).
+- Replay determinism: folding the same events twice yields equal state, and a
+  snapshot plus the remaining events equals a full replay.
+- Projection idempotency: delivering every event twice, and interleaving
+  several streams, yields the same read model as a single clean pass; a gap
+  raises an error instead of advancing the checkpoint.
+- Concurrency: two appends at the same expected version produce exactly one
+  success and one conflict, against a real database.
+- Upcasters: each stored old-version fixture upcasts to the current shape.
+- Erasure: after deleting a subject's key, no read model or index still shows
+  that subject's plaintext.
+
+## Report
+
+- **Fit:** the requirement that justifies event sourcing, or the recommendation
+  against it.
+- **Model:** aggregates, event types with schema versions, and command invariants.
+- **Store:** engine, concurrency mechanism, position and checkpoint strategy.
+- **Publishing and projections:** outbox relay, consumer deduplication, rebuild
+  plan, expected lag.
+- **Versioning, snapshots, and erasure:** the approach chosen for each.
+- **Not verified:** checks that could not run and why.
+
+## Optional delegation
+
+The `database-architect` subagent can review the store schema, constraints, and
+indexes, and the `test-writer` subagent can write the replay, idempotency, and
+concurrency tests. One agent can complete this workflow alone.
