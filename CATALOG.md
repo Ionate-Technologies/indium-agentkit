@@ -83,6 +83,7 @@ leaves them out; install one explicitly with `add <name>`.
 | subagent | `migration-planner` | Audit database schemas, data migrations, and breaking API changes read-only. |
 | subagent | `mobile-specialist` | Audit iOS, Android, React Native, and Flutter app builds read-only. |
 | subagent | `performance-profiler` | Measure performance bottlenecks against a reproducible baseline. |
+| subagent | `plan-reviewer` | Critiques an implementation plan against the actual codebase for missing steps, wrong assumptions, unhandled risks, scope creep, and unverifiable acceptance criteria, and proposes concrete amendments. Use before executing a non-trivial plan, or when a plan touches unfamiliar code, public contracts, data, or production. Read-only. |
 | subagent | `release-engineer` | Audit release readiness, git changelogs, build artifacts, and deployment safety read-only. |
 | subagent | `resilience-reviewer` | Review failure handling, retries, limits, and recovery paths read-only. |
 | subagent | `reviewer` | Review local diffs and PRs for correctness, security, performance, and style read-only. |
