@@ -32,7 +32,31 @@ class ContentToolTests(unittest.TestCase):
             self.assertEqual(skill.returncode, 0, skill.stderr)
             self.assertEqual(agent.returncode, 0, agent.stderr)
             self.assertIn("name: demo-skill", (root / "skills" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8"))
-            self.assertIn("name: demo-agent", (root / "agents" / "demo-agent.md").read_text(encoding="utf-8"))
+            agent_text = (root / "agents" / "demo-agent.md").read_text(encoding="utf-8")
+            self.assertIn("name: demo-agent", agent_text)
+            self.assertIn("Read-only.", agent_text)
+
+            sys.path.insert(0, str(REPO_ROOT / "scripts"))
+            try:
+                import validate_content
+            finally:
+                sys.path.pop(0)
+            self.assertEqual(validate_content.validate_skill(root / "skills" / "demo-skill"), [])
+            self.assertEqual(validate_content.validate_agent(root / "agents" / "demo-agent.md"), [])
+
+    def test_scaffold_marks_write_scoped_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            result = self.run_script(
+                "scaffold_content.py", "agent", "demo-builder",
+                "--description", "Implement assigned changes. Use when the parent assigns a bounded slice",
+                "--tools", "Read, Grep, Glob, Edit, Write, Bash",
+                "--repo-root", str(root),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = (root / "agents" / "demo-builder.md").read_text(encoding="utf-8")
+            self.assertIn("bounded slice. Edits only assigned paths.", text)
+            self.assertNotIn("Read-only.", text)
 
     def test_scaffold_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
